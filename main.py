@@ -90,7 +90,7 @@ def print_signals(signals: list[Signal], market: MarketRegime) -> None:
         sl_pct = (s.stop_loss_price - s.price) / s.price * 100
         tp_pct = (s.take_profit_price - s.price) / s.price * 100
         ta_pct = (s.trailing_activate_price - s.price) / s.price * 100
-        print(f"\n  {s.code} | {s.name} | 评分: {s.score} | 价格: {s.price} | {label}")
+        print(f"\n  {s.code} | {s.name} | 评分: {s.score} | 价格: {s.price} | ATR: {s.atr} | {label}")
         print(f"    止损: {s.stop_loss_price} ({sl_pct:+.1f}%)  止盈: {s.take_profit_price} ({tp_pct:+.1f}%)  移动止损启动: {s.trailing_activate_price} ({ta_pct:+.1f}%)")
         detail_str = "  ".join(f"{k}={v}" for k, v in s.details.items())
         print(f"    详情: {detail_str}")

@@ -91,44 +91,88 @@ def detect_market_regime() -> MarketRegime:
 
 
 def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
-    """计算买入评分 0~100，返回 (分数, 各项详情)"""
+    """计算买入评分 0~100，返回 (分数, 各项详情)
+
+    评分体系（5个独立维度，总分100）：
+      趋势强度(30) + MACD动量(25) + RSI区间(20) + 量能(15) + 布林带(10)
+    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     score = 0
     details: dict[str, str] = {}
 
-    def _add(key: str, condition: bool) -> None:
-        nonlocal score
-        w = SCORE_WEIGHTS[key]
-        if condition:
-            score += w
-            details[key] = f"+{w}"
-        else:
-            details[key] = "0"
+    # --- 趋势强度（最高30分，分层互斥，取最高匹配档） ---
+    if last["ma5"] > last["ma10"] > last["ma20"] and last["ma20"] > last["ma60"]:
+        pts = SCORE_WEIGHTS["trend_strength"]   # 30
+        details["trend_strength"] = f"+{pts}(完全多头5>10>20>60)"
+    elif last["ma5"] > last["ma10"] > last["ma20"]:
+        pts = 20
+        details["trend_strength"] = "+20(三线多头5>10>20)"
+    elif last["收盘"] > last["ma20"]:
+        pts = 10
+        details["trend_strength"] = "+10(站上MA20)"
+    else:
+        pts = 0
+        details["trend_strength"] = "0"
+    score += pts
 
-    # 站上20日线
-    _add("trend_ma20", last["收盘"] > last["ma20"])
+    # --- MACD动量（最高25分，分层互斥） ---
+    is_golden_cross = prev["macd_dif"] <= prev["macd_dea"] and last["macd_dif"] > last["macd_dea"]
+    dif_above_dea = last["macd_dif"] > last["macd_dea"]
+    hist_expanding = last["macd_hist"] > prev["macd_hist"]
 
-    # 均线多头排列 5 > 10 > 20
-    _add("ma_bullish", last["ma5"] > last["ma10"] > last["ma20"])
+    if is_golden_cross:
+        pts = SCORE_WEIGHTS["macd_momentum"]    # 25
+        details["macd_momentum"] = f"+{pts}(MACD金叉)"
+    elif dif_above_dea and hist_expanding:
+        pts = 20
+        details["macd_momentum"] = "+20(DIF>DEA柱扩张)"
+    elif dif_above_dea:
+        pts = 10
+        details["macd_momentum"] = "+10(DIF>DEA柱收缩)"
+    else:
+        pts = 0
+        details["macd_momentum"] = "0"
+    score += pts
 
-    # MA5 上穿 MA10（金叉）
-    _add("ma_golden_cross", prev["ma5"] <= prev["ma10"] and last["ma5"] > last["ma10"])
-
-    # MACD 金叉
-    _add("macd_golden_cross", prev["macd_dif"] <= prev["macd_dea"] and last["macd_dif"] > last["macd_dea"])
-
-    # RSI 健康区间（不超买不超卖）
+    # --- RSI区间（最高20分，分层互斥） ---
     rsi_val = float(last.get("rsi", 50))
-    is_rsi_healthy = 30 < rsi_val < 65
-    _add("rsi_healthy", is_rsi_healthy)
-    details["rsi_healthy"] = f"{details['rsi_healthy']} (RSI={rsi_val:.1f})"
+    if 45 <= rsi_val < 65:
+        pts = SCORE_WEIGHTS["rsi_zone"]         # 20
+        details["rsi_zone"] = f"+{pts}(RSI最佳区={rsi_val:.1f})"
+    elif 30 <= rsi_val < 45:
+        pts = 12
+        details["rsi_zone"] = f"+12(RSI回暖区={rsi_val:.1f})"
+    elif 65 <= rsi_val < 75:
+        pts = 8
+        details["rsi_zone"] = f"+8(RSI强势区={rsi_val:.1f})"
+    else:
+        pts = 0
+        details["rsi_zone"] = f"0(RSI={rsi_val:.1f})"
+    score += pts
 
-    # 放量上涨
-    _add("volume_surge", last["收盘"] > prev["收盘"] and last["成交量"] > last["vol_ma5"] * 1.2)
+    # --- 量能确认（最高15分，分层互斥） ---
+    price_up = last["收盘"] > prev["收盘"]
+    vol_ratio = last["成交量"] / last["vol_ma5"] if last["vol_ma5"] > 0 else 0.0
+    if price_up and vol_ratio >= 1.5:
+        pts = SCORE_WEIGHTS["volume_surge"]     # 15
+        details["volume_surge"] = f"+{pts}(强放量×{vol_ratio:.1f})"
+    elif price_up and vol_ratio >= 1.2:
+        pts = 10
+        details["volume_surge"] = f"+10(温和放量×{vol_ratio:.1f})"
+    else:
+        pts = 0
+        details["volume_surge"] = f"0(量比×{vol_ratio:.1f})"
+    score += pts
 
-    # 布林带中轨支撑
-    _add("boll_support", last["收盘"] > last["boll_mid"] and last["收盘"] < last["boll_upper"])
+    # --- 布林带支撑（10分，二元） ---
+    if last["收盘"] > last["boll_mid"] and last["收盘"] < last["boll_upper"]:
+        pts = SCORE_WEIGHTS["boll_support"]     # 10
+        details["boll_support"] = f"+{pts}"
+    else:
+        pts = 0
+        details["boll_support"] = "0"
+    score += pts
 
     return min(score, 100), details
 
@@ -167,7 +211,7 @@ def generate_signal(
     df = calc_all_indicators(df)
     last = df.iloc[-1]
 
-    required = ["ma5", "ma10", "ma20", "macd_dif", "macd_dea", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
+    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
     if last[required].isna().any():
         logger.debug("%s %s 指标存在NaN，跳过", code, name)
         return None

@@ -159,7 +159,7 @@ class BacktestEngine:
                     if len(hist) >= 60:
                         hist = calc_all_indicators(hist)
                         last = hist.iloc[-1]
-                        required = ["ma5", "ma10", "ma20", "macd_dif", "macd_dea", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
+                        required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
                         if not last[required].isna().any():
                             sig_score, _ = score_buy_signal(hist)
                             if sig_score <= self.sell_threshold:
@@ -197,7 +197,7 @@ class BacktestEngine:
 
                     hist = calc_all_indicators(hist)
                     last = hist.iloc[-1]
-                    required = ["ma5", "ma10", "ma20", "macd_dif", "macd_dea", "rsi", "boll_mid", "boll_upper", "vol_ma5", "atr"]
+                    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5", "atr"]
                     if last[required].isna().any():
                         continue
 
