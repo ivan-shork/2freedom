@@ -48,6 +48,9 @@ SINGLE_POSITION_PCT: float = 0.20      # 单只最大仓位 20%
 BULL_THRESHOLD: float = 0.7
 BEAR_THRESHOLD: float = 0.3
 
+# ======================== 数据缓存 ========================
+USE_CACHE: bool = True                  # 启用本地缓存，同一天内复用已拉取数据
+
 # ======================== API并发 ========================
 MAX_WORKERS: int = 10
 API_RETRY: int = 3

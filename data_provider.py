@@ -2,12 +2,17 @@
 
 替代akshare，提供ETF池、历史行情、指数数据接口。
 输出列名与原akshare版本保持一致，下游代码无需修改。
+
+支持本地缓存：同一自然日内历史数据不变，缓存后跳过API调用。
 """
 
+import json
 import logging
 import os
+import pickle
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import tushare as ts
@@ -18,11 +23,131 @@ from config import (
     ETF_MIN_DAILY_VOLUME,
     ETF_POOL_SIZE,
     HISTORY_DAYS,
+    USE_CACHE,
 )
 
 logger = logging.getLogger(__name__)
 
 _pro = None
+_force_refresh: bool = False
+
+_CACHE_DIR = Path(__file__).parent / "data_cache"
+
+
+def set_refresh(refresh: bool) -> None:
+    """设置是否强制刷新缓存（由 main.py 的 --refresh 参数调用）"""
+    global _force_refresh
+    _force_refresh = refresh
+
+
+# ======================== 缓存工具函数 ========================
+
+
+def _cache_dir() -> Path:
+    """返回缓存根目录，不存在则创建"""
+    return _CACHE_DIR
+
+
+def _is_cache_valid() -> bool:
+    """判断缓存是否有效：cache_info.json 存在且 created_date == 今天"""
+    if _force_refresh or not USE_CACHE:
+        return False
+    info_path = _cache_dir() / "cache_info.json"
+    if not info_path.exists():
+        return False
+    try:
+        with open(info_path, encoding="utf-8") as f:
+            info = json.load(f)
+        return info.get("created_date") == datetime.now().strftime("%Y-%m-%d")
+    except (json.JSONDecodeError, KeyError):
+        return False
+
+
+def _save_cache_info(trade_date: str) -> None:
+    """写入缓存元信息"""
+    _cache_dir().mkdir(parents=True, exist_ok=True)
+    info = {
+        "created_date": datetime.now().strftime("%Y-%m-%d"),
+        "trade_date": trade_date,
+    }
+    with open(_cache_dir() / "cache_info.json", "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+
+
+def _load_pool_cache() -> list[dict] | None:
+    """从缓存读取ETF池"""
+    if not _is_cache_valid():
+        return None
+    path = _cache_dir() / "pool.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            pool = json.load(f)
+        logger.info("使用缓存数据 (ETF池)")
+        return pool
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("读取ETF池缓存失败: %s", e)
+        return None
+
+
+def _save_pool_cache(pool: list[dict], trade_date: str) -> None:
+    """将ETF池写入缓存"""
+    _cache_dir().mkdir(parents=True, exist_ok=True)
+    with open(_cache_dir() / "pool.json", "w", encoding="utf-8") as f:
+        json.dump(pool, f, ensure_ascii=False, indent=2)
+    _save_cache_info(trade_date)
+
+
+def _load_etf_cache(ts_code: str) -> pd.DataFrame | None:
+    """从缓存读取单只ETF历史数据"""
+    if not _is_cache_valid():
+        return None
+    path = _cache_dir() / "etf" / f"{ts_code}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            df = pickle.load(f)
+        return df
+    except (pickle.UnpicklingError, OSError) as e:
+        logger.warning("读取ETF缓存失败 %s: %s", ts_code, e)
+        return None
+
+
+def _save_etf_cache(ts_code: str, df: pd.DataFrame) -> None:
+    """将单只ETF历史数据写入缓存"""
+    etf_dir = _cache_dir() / "etf"
+    etf_dir.mkdir(parents=True, exist_ok=True)
+    with open(etf_dir / f"{ts_code}.pkl", "wb") as f:
+        pickle.dump(df, f)
+
+
+def _load_index_cache(ts_code: str) -> pd.DataFrame | None:
+    """从缓存读取指数日线数据"""
+    if not _is_cache_valid():
+        return None
+    path = _cache_dir() / "index" / f"{ts_code}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            df = pickle.load(f)
+        return df
+    except (pickle.UnpicklingError, OSError) as e:
+        logger.warning("读取指数缓存失败 %s: %s", ts_code, e)
+        return None
+
+
+def _save_index_cache(ts_code: str, df: pd.DataFrame) -> None:
+    """将指数日线数据写入缓存"""
+    index_dir = _cache_dir() / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    with open(index_dir / f"{ts_code}.pkl", "wb") as f:
+        pickle.dump(df, f)
+
+
+# ======================== API 函数 ========================
 
 
 def _get_pro() -> ts.pro_api:
@@ -36,6 +161,9 @@ def _get_pro() -> ts.pro_api:
             )
         ts.set_token(token)
         _pro = ts.pro_api()
+        _pro._DataApi__http_url = "http://101.353.233.113:8020/"
+        df = _pro.index_basic(limit=5)
+        print(df)
         logger.info("Tushare Pro API 初始化成功")
     return _pro
 
@@ -53,6 +181,11 @@ def _latest_trade_date() -> str:
 
 def get_etf_pool(top_n: int = ETF_POOL_SIZE) -> list[dict]:
     """获取优质流动性ETF池，返回 [{code, name, ts_code}]"""
+    # 缓存命中直接返回
+    cached = _load_pool_cache()
+    if cached is not None and len(cached) == top_n:
+        return cached
+
     pro = _get_pro()
     logger.info("正在通过Tushare获取全市场ETF行情...")
 
@@ -84,6 +217,9 @@ def get_etf_pool(top_n: int = ETF_POOL_SIZE) -> list[dict]:
         .to_dict("records")
     )
     logger.info("筛选出 %d 只优质流动性ETF（交易日: %s）", len(pool), trade_date)
+
+    # 写入缓存
+    _save_pool_cache(pool, trade_date)
     return pool
 
 
@@ -94,6 +230,11 @@ def fetch_etf_history(
 
     返回 DataFrame 列名：日期 / 开盘 / 最高 / 最低 / 收盘 / 成交量
     """
+    # 缓存命中直接返回
+    cached_df = _load_etf_cache(ts_code)
+    if cached_df is not None:
+        return code, name, cached_df
+
     pro = _get_pro()
     start_date = (datetime.now() - timedelta(days=HISTORY_DAYS)).strftime("%Y%m%d")
     end_date = datetime.now().strftime("%Y%m%d")
@@ -128,6 +269,9 @@ def fetch_etf_history(
 
             if len(df) < 30:
                 return None
+
+            # 写入缓存
+            _save_etf_cache(ts_code, df)
             return code, name, df
 
         except Exception as e:
@@ -145,6 +289,11 @@ def get_index_daily(ts_code: str = "000001.SH") -> pd.DataFrame:
     返回 DataFrame 含 close 列，按日期升序排列。
     拉取150个自然日（约105个交易日）确保 MA60 有足够数据，同时覆盖国庆/春节长假。
     """
+    # 缓存命中直接返回
+    cached_df = _load_index_cache(ts_code)
+    if cached_df is not None:
+        return cached_df
+
     pro = _get_pro()
     start_date = (datetime.now() - timedelta(days=150)).strftime("%Y%m%d")
     df = pro.index_daily(
@@ -154,4 +303,9 @@ def get_index_daily(ts_code: str = "000001.SH") -> pd.DataFrame:
     )
     if df is None or df.empty:
         return pd.DataFrame()
-    return df.sort_values("trade_date").reset_index(drop=True)
+
+    result = df.sort_values("trade_date").reset_index(drop=True)
+
+    # 写入缓存
+    _save_index_cache(ts_code, result)
+    return result

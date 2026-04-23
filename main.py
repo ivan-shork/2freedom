@@ -6,6 +6,7 @@
 - 回测策略绩效
 """
 
+import argparse
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,7 +17,7 @@ from config import (
     ETF_POOL_SIZE,
     MAX_WORKERS,
 )
-from data_provider import fetch_etf_history, get_etf_pool
+from data_provider import fetch_etf_history, get_etf_pool, set_refresh
 from strategy import (
     Signal,
     MarketRegime,
@@ -129,6 +130,15 @@ def print_backtest_result(result: BacktestResult) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="A股ETF中短期交易策略扫描")
+    parser.add_argument(
+        "--refresh", action="store_true", help="强制刷新缓存，重新从API拉取数据"
+    )
+    args = parser.parse_args()
+    if args.refresh:
+        set_refresh(True)
+        logger.info("已启用强制刷新模式，将忽略本地缓存")
+
     logger.info("=== 开始每日ETF策略扫描 ===")
 
     # 1. 市场环境
