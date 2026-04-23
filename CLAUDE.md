@@ -2,35 +2,57 @@
 
 ## 项目概述
 
-基于技术指标的A股ETF量化扫描与回测系统。通过akshare接口获取全市场ETF行情，计算技术指标并打分，生成买卖信号，同时提供回测引擎验证策略有效性。
+基于技术指标的A股ETF量化扫描与回测系统。通过 Tushare Pro 接口获取全市场ETF行情，计算技术指标并打分，生成买卖信号，同时提供回测引擎验证策略有效性。
 
 ## 运行方式
 
 ```bash
 pip install -r requirements.txt
+
+# 首次运行需设置 Tushare token（永久生效，设置后重开终端）
+setx TUSHARE_TOKEN 你的token
+
 python main.py
 ```
 
 输出：控制台打印扫描报告 + 回测绩效，日志写入 `etf_scan.log`。
 
+### 获取 Tushare Token
+1. 在 [tushare.pro](https://tushare.pro) 注册账号
+2. 完善个人资料可获得 120 积分（满足所有接口权限要求）
+3. 在"个人中心"复制 token
+
 ## 文件结构
 
 ```
 config.py          全局配置（评分权重、止损止盈、API参数等）
+data_provider.py   数据层（Tushare接口封装，ETF池/历史行情/指数数据）
 indicators.py      技术指标计算（MA/MACD/RSI/布林带/ATR）
 strategy.py        策略核心（加权评分、市场环境判断、信号生成）
 backtest.py        回测引擎（日线模拟、绩效指标计算）
 main.py            入口（并发数据获取、扫描、输出）
 etf_buy_signal.py  原始版本（保留参考）
-requirements.txt   依赖：akshare, pandas, numpy
+requirements.txt   依赖：tushare, pandas, numpy
 ```
 
 ## 策略逻辑
 
 ### 数据源
-- **akshare** 接口：`fund_etf_spot_em` 获取全市场ETF实时行情，`fund_etf_hist_em` 获取单只ETF日线历史
-- 筛选条件：剔除货币/债券/商品/跨境ETF，市值>2亿，日成交额>5000万，取流动性前100只
+- **Tushare Pro** 接口（替代原 akshare，原因：akshare 依赖东方财富CDN节点，国内IP频繁被限流/拒绝）
+  - `fund_basic` + `fund_daily` 获取全市场ETF行情及日成交额
+  - `fund_daily`（按 ts_code）获取单只ETF日线历史
+  - `index_daily` 获取上证指数日线数据
+- 筛选条件：剔除货币/债券/国债/转债/黄金/原油/纳指/日经ETF，日成交额 > 5000万，取流动性前100只
+  - 注：Tushare `fund_daily` 无总市值字段，原"市值 > 2亿"筛选已移除；成交额 > 5000万在实践上等价覆盖该条件
 - 历史数据动态拉取最近120个自然日
+
+### Tushare 字段说明
+| Tushare 字段 | 单位 | 转换后 | 用途 |
+|---|---|---|---|
+| `fund_daily.amount` | 千元 | ×1000 → 元 | 成交额筛选 |
+| `fund_daily.vol` | 手 | 直接用（相对比较） | 量能信号 |
+| `fund_daily.close/open/high/low` | 元/份 | rename | 技术指标 |
+| `index_daily.close` | 点 | 直接用 | 市场环境 |
 
 ### 技术指标
 | 指标 | 用途 |
@@ -59,7 +81,8 @@ requirements.txt   依赖：akshare, pandas, numpy
 - **卖出**: 评分 <= 40
 
 ### 市场环境过滤
-- 基于上证指数（sh000001）的MA20/MA60位置和20日动量综合评分
+- 基于上证指数（000001.SH）的MA20/MA60位置和20日动量综合评分
+- 拉取最近150个自然日（≈105交易日），确保 MA60 在国庆/春节长假后仍有足够数据
 - 牛市（>=0.7）/ 震荡（0.3~0.7）/ 熊市（<=0.3）
 - 熊市自动提高买入门槛，减少假突破风险
 
@@ -101,12 +124,13 @@ requirements.txt   依赖：akshare, pandas, numpy
 ## 依赖
 
 - Python >= 3.10（使用 `X | None` 类型语法）
-- akshare（A股数据接口）
+- tushare（A股数据接口，需注册获取 token）
 - pandas / numpy（数据处理）
 
 ## 注意事项
 
-- akshare API依赖网络，频率过高可能被限流，并发数控制在10
-- `stock_zh_index_daily` 列名可能因akshare版本不同而变化（close/open/high/low）
+- Tushare 免费账号每分钟限200次调用，100只ETF并发拉取不会触发限流
+- 若报"权限不足"，在 tushare.pro 完善个人资料获取积分即可（免费120积分够用）
+- `TUSHARE_TOKEN` 通过环境变量注入，不要硬编码在代码里
 - 回测基于日线收盘价，不考虑盘中滑点和手续费
 - 策略仅供研究参考，不构成投资建议

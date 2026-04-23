@@ -2,7 +2,6 @@
 
 import logging
 
-import akshare as ak
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from config import (
     TRAILING_ACTIVATE_ATR_MULT,
     TRAILING_STOP_ATR_MULT,
 )
+from data_provider import get_index_daily
 from indicators import calc_all_indicators
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class MarketRegime:
 def detect_market_regime() -> MarketRegime:
     """基于上证指数判断当前市场环境"""
     try:
-        df = ak.stock_zh_index_daily(symbol="sh000001")
+        df = get_index_daily("000001.SH")
         if df is None or len(df) < 60:
             return MarketRegime("sideways", 0.5, "数据不足，默认震荡")
 
