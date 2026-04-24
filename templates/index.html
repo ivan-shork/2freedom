@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2Freedom — A股ETF量化系统</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: #f8f9fa; }
+    .navbar-brand { font-weight: 700; letter-spacing: 1px; }
+    .rec-clear  { color: #dc3545; font-weight: 600; }
+    .rec-move   { color: #198754; font-weight: 600; }
+    .rec-tighten{ color: #fd7e14; font-weight: 600; }
+    .rec-reduce { color: #ffc107; font-weight: 600; }
+    .rec-hold   { color: #6c757d; }
+    .loading-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.45); z-index: 9999;
+      align-items: center; justify-content: center; flex-direction: column;
+    }
+    .loading-overlay.active { display: flex; }
+    .spin { width: 3rem; height: 3rem; border-width: .4rem; }
+    #scan-last { font-size: .8rem; color: #6c757d; }
+    .review-panel { background: #fff; border: 1px solid #dee2e6; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
+    .review-item { border-left: 4px solid #dee2e6; padding: .5rem .75rem; margin-bottom: .5rem; border-radius: 0 .25rem .25rem 0; }
+    .review-item.clear   { border-color: #dc3545; background: #fff5f5; }
+    .review-item.move    { border-color: #198754; background: #f0fff4; }
+    .review-item.tighten { border-color: #fd7e14; background: #fff8f0; }
+    .review-item.hold    { border-color: #0d6efd; background: #f0f4ff; }
+    td, th { vertical-align: middle !important; }
+    .pnl-pos { color: #198754; font-weight: 600; }
+    .pnl-neg { color: #dc3545; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<div class="loading-overlay" id="loading">
+  <div class="spinner-border text-light spin" role="status"></div>
+  <div class="text-white mt-3" id="loading-msg">处理中，请稍候...</div>
+</div>
+
+<nav class="navbar navbar-dark bg-dark px-3">
+  <span class="navbar-brand">2Freedom · A股ETF量化系统</span>
+</nav>
+
+<div class="container-fluid py-3">
+  <ul class="nav nav-tabs mb-3" id="mainTab">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-scan">ETF 扫描</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-portfolio" onclick="loadPortfolio()">持仓管理</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-history" onclick="loadHistory()">交易历史</button></li>
+  </ul>
+
+  <div class="tab-content">
+
+    <!-- ══════════════ Tab1: ETF扫描 ══════════════ -->
+    <div class="tab-pane fade show active" id="tab-scan">
+      <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+        <div id="market-badge" class="badge bg-secondary fs-6">市场环境加载中...</div>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadMarket()">刷新环境</button>
+        <button class="btn btn-primary" onclick="startScan()">▶ 开始全量扫描</button>
+        <span id="scan-last"></span>
+      </div>
+      <div id="scan-empty" class="text-muted">点击「开始全量扫描」获取今日信号（预计需要 30~60 秒）</div>
+      <table class="table table-hover table-sm d-none" id="scan-table">
+        <thead class="table-dark">
+          <tr>
+            <th>代码</th><th>名称</th><th>评分</th><th>当前价</th>
+            <th>止损价</th><th>止盈价</th><th>信号</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="scan-body"></tbody>
+      </table>
+    </div>
+
+    <!-- ══════════════ Tab2: 持仓管理 ══════════════ -->
+    <div class="tab-pane fade" id="tab-portfolio">
+      <div class="d-flex gap-2 mb-3 flex-wrap">
+        <button class="btn btn-success" onclick="showAddModal()">+ 手动添加持仓</button>
+        <button class="btn btn-primary" onclick="runReview()">▶ 一键盘后复盘</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm">
+          <thead class="table-dark">
+            <tr>
+              <th>代码</th><th>名称</th><th>买入日期</th><th>买入均价</th><th>份额</th>
+              <th>当前价</th><th>浮盈亏</th>
+              <th style="min-width:130px">距止损 ▼</th>
+              <th style="min-width:130px">距止盈 ▲</th>
+              <th>评分</th><th>建议</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="portfolio-body"><tr><td colspan="12" class="text-center text-muted">加载中...</td></tr></tbody>
+        </table>
+      </div>
+      <div id="review-panel" class="review-panel d-none">
+        <h6 class="mb-2">复盘报告 · <span id="review-date"></span></h6>
+        <div id="review-list"></div>
+      </div>
+    </div>
+
+    <!-- ══════════════ Tab3: 交易历史 ══════════════ -->
+    <div class="tab-pane fade" id="tab-history">
+      <div class="table-responsive">
+        <table class="table table-hover table-sm">
+          <thead class="table-dark">
+            <tr>
+              <th>代码</th><th>名称</th><th>开仓日</th><th>平仓日</th><th>持仓天数</th>
+              <th>总份额</th><th>买入均价</th><th>卖出均价</th>
+              <th>盈亏金额</th><th>盈亏%</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"><tr><td colspan="10" class="text-center text-muted">加载中...</td></tr></tbody>
+        </table>
+      </div>
+      <!-- 汇总统计 -->
+      <div id="history-summary" class="d-none mt-3">
+        <div class="row g-2">
+          <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">总交易</div><div id="s-total" class="fw-bold">-</div></div></div>
+          <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">胜率</div><div id="s-winrate" class="fw-bold">-</div></div></div>
+          <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">累计盈亏</div><div id="s-pnl" class="fw-bold">-</div></div></div>
+          <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">平均持仓天数</div><div id="s-days" class="fw-bold">-</div></div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ 添加持仓 Modal ══ -->
+<div class="modal fade" id="addModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">添加持仓</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-2 row"><label class="col-4 col-form-label">ETF代码</label><div class="col-8"><input id="f-code" class="form-control" placeholder="如 510050"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">名称</label><div class="col-8"><input id="f-name" class="form-control" placeholder="如 50ETF"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">买入日期</label><div class="col-8"><input id="f-date" type="date" class="form-control"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">买入价</label><div class="col-8"><input id="f-price" type="number" step="0.001" class="form-control"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">份额（股）</label><div class="col-8"><input id="f-shares" type="number" step="100" class="form-control"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">止损价</label><div class="col-8"><input id="f-sl" type="number" step="0.001" class="form-control" placeholder="留空自动计算"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">止盈价</label><div class="col-8"><input id="f-tp" type="number" step="0.001" class="form-control" placeholder="留空自动计算"></div></div>
+        <div class="mb-2 row"><label class="col-4 col-form-label">备注</label><div class="col-8"><input id="f-notes" class="form-control"></div></div>
+        <div class="text-muted small">止损/止盈留空时将根据最新 ATR 自动计算</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-success" onclick="submitAdd()">确认添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 补仓 Modal ══ -->
+<div class="modal fade" id="addToModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">补仓 · <span id="at-name"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="at-id">
+        <div class="mb-2"><label class="form-label">买入日期</label><input id="at-date" type="date" class="form-control"></div>
+        <div class="mb-2"><label class="form-label">补仓价</label><input id="at-price" type="number" step="0.001" class="form-control"></div>
+        <div class="mb-2"><label class="form-label">份额（股）</label><input id="at-shares" type="number" step="100" class="form-control"></div>
+        <div class="text-muted small">补仓后买入均价将自动重算</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-warning" onclick="submitAddTo()">确认补仓</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 减仓/平仓 Modal ══ -->
+<div class="modal fade" id="sellModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">减仓/平仓 · <span id="sl-name"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="sl-id">
+        <input type="hidden" id="sl-max-shares">
+        <div class="mb-2"><label class="form-label">卖出日期</label><input id="sl-date" type="date" class="form-control"></div>
+        <div class="mb-2"><label class="form-label">卖出价</label><input id="sl-price" type="number" step="0.001" class="form-control"></div>
+        <div class="mb-2">
+          <label class="form-label">卖出份额（股）</label>
+          <input id="sl-shares" type="number" step="100" class="form-control">
+          <div class="form-text">持仓 <span id="sl-max-label"></span> 股，留空则全部卖出</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-danger" onclick="submitSell()">确认卖出</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ 编辑风控 Modal ══ -->
+<div class="modal fade" id="editModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">修改风控价位</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="e-id">
+        <div class="mb-2"><label class="form-label">止损价</label><input id="e-sl" type="number" step="0.001" class="form-control"></div>
+        <div class="mb-2"><label class="form-label">止盈价</label><input id="e-tp" type="number" step="0.001" class="form-control"></div>
+        <div class="mb-2"><label class="form-label">备注</label><input id="e-notes" class="form-control"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button class="btn btn-primary" onclick="submitEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const addModal   = new bootstrap.Modal('#addModal');
+const addToModal = new bootstrap.Modal('#addToModal');
+const sellModal  = new bootstrap.Modal('#sellModal');
+const editModal  = new bootstrap.Modal('#editModal');
+
+// ── 工具 ─────────────────────────────────────────────────
+
+function showLoading(msg) {
+  document.getElementById('loading-msg').textContent = msg || '处理中，请稍候...';
+  document.getElementById('loading').classList.add('active');
+}
+function hideLoading() { document.getElementById('loading').classList.remove('active'); }
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function recLabel(rec) {
+  const map = { clear:'⚠ 建议清仓', move_sl_up:'↑ 上移止损', tighten_tp:'→ 收紧止盈', reduce:'↓ 建议减仓', hold:'持有' };
+  const cls  = { clear:'rec-clear', move_sl_up:'rec-move', tighten_tp:'rec-tighten', reduce:'rec-reduce', hold:'rec-hold' };
+  return `<span class="${cls[rec]||'rec-hold'}">${map[rec]||rec}</span>`;
+}
+
+function scoreColor(s) {
+  if (s >= 75) return 'success';
+  if (s >= 65) return 'primary';
+  if (s >= 40) return 'warning';
+  return 'danger';
+}
+
+function progressBar(pct, color) {
+  const w = Math.min(100, Math.max(0, pct ?? 0)).toFixed(0);
+  return `<div class="progress" style="height:8px"><div class="progress-bar bg-${color}" style="width:${w}%"></div></div>`;
+}
+
+function pnlSpan(v) {
+  if (v == null) return '<span class="text-muted">-</span>';
+  const cls = v >= 0 ? 'pnl-pos' : 'pnl-neg';
+  return `<span class="${cls}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+}
+
+function pnlAmtSpan(v) {
+  if (v == null) return '-';
+  const cls = v >= 0 ? 'pnl-pos' : 'pnl-neg';
+  return `<span class="${cls}">${v >= 0 ? '+' : ''}${v.toFixed(2)}</span>`;
+}
+
+// ── Tab1: 市场环境 & 扫描 ─────────────────────────────────
+
+async function loadMarket() {
+  const data = await api('GET', '/api/market_regime');
+  if (data.error) return;
+  const color = { bull:'success', bear:'danger', sideways:'warning' }[data.regime] || 'secondary';
+  const label = { bull:'牛市', bear:'熊市', sideways:'震荡市' }[data.regime] || data.regime;
+  const el = document.getElementById('market-badge');
+  el.className = `badge bg-${color} fs-6`;
+  el.textContent = `市场环境：${label}（${data.score.toFixed(2)}）`;
+}
+
+async function startScan() {
+  showLoading('正在全量扫描（约 30~60 秒）...');
+  try {
+    const data = await api('POST', '/api/scan');
+    if (data.error) { alert('扫描失败：' + data.error); return; }
+
+    const tbody = document.getElementById('scan-body');
+    tbody.innerHTML = '';
+    if (!data.signals.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="text-center">今日无买入信号</td></tr>';
+    } else {
+      const actionMap = { strong_buy:'强烈买入', buy:'买入观察' };
+      data.signals.forEach(s => {
+        tbody.insertAdjacentHTML('beforeend', `
+          <tr>
+            <td>${s.code}</td><td>${s.name}</td>
+            <td><span class="badge bg-${scoreColor(s.score)}">${s.score}</span></td>
+            <td>${s.price.toFixed(3)}</td>
+            <td class="text-danger">${s.stop_loss_price.toFixed(3)}</td>
+            <td class="text-success">${s.take_profit_price.toFixed(3)}</td>
+            <td>${actionMap[s.action]||s.action}</td>
+            <td><button class="btn btn-sm btn-outline-success" onclick='quickAdd(${JSON.stringify(s)})'>+ 录入</button></td>
+          </tr>`);
+      });
+    }
+    document.getElementById('scan-table').classList.remove('d-none');
+    document.getElementById('scan-empty').classList.add('d-none');
+    document.getElementById('scan-last').textContent = '上次扫描：' + new Date().toLocaleTimeString();
+    if (data.market) {
+      const color = { bull:'success', bear:'danger', sideways:'warning' }[data.market.regime] || 'secondary';
+      const label = { bull:'牛市', bear:'熊市', sideways:'震荡市' }[data.market.regime] || data.market.regime;
+      const el = document.getElementById('market-badge');
+      el.className = `badge bg-${color} fs-6`;
+      el.textContent = `市场环境：${label}（${data.market.score.toFixed(2)}）`;
+    }
+  } finally { hideLoading(); }
+}
+
+function quickAdd(s) {
+  document.getElementById('f-code').value  = s.code;
+  document.getElementById('f-name').value  = s.name;
+  document.getElementById('f-date').value  = new Date().toISOString().slice(0,10);
+  document.getElementById('f-price').value = s.price;
+  document.getElementById('f-sl').value    = s.stop_loss_price;
+  document.getElementById('f-tp').value    = s.take_profit_price;
+  document.getElementById('f-shares').value = '';
+  addModal.show();
+}
+
+// ── Tab2: 持仓管理 ────────────────────────────────────────
+
+async function loadPortfolio() {
+  const data = await api('GET', '/api/positions');
+  const tbody = document.getElementById('portfolio-body');
+  tbody.innerHTML = '';
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center text-muted">暂无持仓，点击「手动添加持仓」录入</td></tr>';
+    return;
+  }
+  data.forEach(p => {
+    const cur = p.current_price;
+    const refPrice = cur ?? p.buy_price;
+    const slRange  = p.buy_price - p.stop_loss;
+    const tpRange  = p.take_profit - p.buy_price;
+    const stopPct  = slRange > 0 ? (refPrice - p.stop_loss) / slRange * 100 : 100;
+    const tpPct    = tpRange > 0 ? (refPrice - p.buy_price) / tpRange * 100 : 0;
+    const score    = p.current_score != null ? `<span class="badge bg-${scoreColor(p.current_score)}">${p.current_score}</span>` : '-';
+    const rec      = p.recommendation ? recLabel(p.recommendation) : '-';
+    const pData    = JSON.stringify(p).replace(/"/g, '&quot;');
+
+    tbody.insertAdjacentHTML('beforeend', `
+      <tr>
+        <td>${p.code}</td>
+        <td>${p.name}</td>
+        <td>${p.buy_date}</td>
+        <td>${p.buy_price.toFixed(4)}</td>
+        <td>${p.shares}</td>
+        <td>${cur != null ? cur.toFixed(3) : '<span class="text-muted">待复盘</span>'}</td>
+        <td>${pnlSpan(p.pnl_pct)}</td>
+        <td>
+          ${progressBar(stopPct, 'success')}
+          <div class="d-flex justify-content-between" style="font-size:.75rem">
+            <span class="text-muted">止损 ${p.stop_loss.toFixed(3)}</span>
+            <span>${Math.min(100,Math.max(0,stopPct)).toFixed(0)}%</span>
+          </div>
+        </td>
+        <td>
+          ${progressBar(tpPct, 'danger')}
+          <div class="d-flex justify-content-between" style="font-size:.75rem">
+            <span class="text-muted">止盈 ${p.take_profit.toFixed(3)}</span>
+            <span>${Math.min(100,Math.max(0,tpPct)).toFixed(0)}%</span>
+          </div>
+        </td>
+        <td>${score}</td>
+        <td>${rec}</td>
+        <td class="text-nowrap">
+          <button class="btn btn-sm btn-outline-secondary me-1" onclick='showEditModal(${pData})'>编辑</button>
+          <button class="btn btn-sm btn-outline-warning me-1" onclick='showAddToModal(${pData})'>补仓</button>
+          <button class="btn btn-sm btn-outline-danger" onclick='showSellModal(${pData})'>卖出</button>
+        </td>
+      </tr>`);
+  });
+}
+
+// ── 添加持仓 ──
+
+function showAddModal() {
+  ['f-code','f-name','f-price','f-shares','f-sl','f-tp','f-notes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('f-date').value = new Date().toISOString().slice(0,10);
+  addModal.show();
+}
+
+async function submitAdd() {
+  const body = {
+    code:       document.getElementById('f-code').value.trim(),
+    name:       document.getElementById('f-name').value.trim(),
+    buy_date:   document.getElementById('f-date').value,
+    buy_price:  document.getElementById('f-price').value,
+    shares:     document.getElementById('f-shares').value,
+    stop_loss:  document.getElementById('f-sl').value || undefined,
+    take_profit:document.getElementById('f-tp').value || undefined,
+    notes:      document.getElementById('f-notes').value,
+  };
+  if (!body.code || !body.name || !body.buy_price || !body.shares) {
+    alert('请填写代码、名称、买入价和份额'); return;
+  }
+  showLoading('正在获取 ATR 数据...');
+  addModal.hide();
+  try {
+    const data = await api('POST', '/api/positions', body);
+    if (data.error) { alert('添加失败：' + data.error); return; }
+    await loadPortfolio();
+  } finally { hideLoading(); }
+}
+
+// ── 补仓 ──
+
+function showAddToModal(p) {
+  document.getElementById('at-id').value    = p.id;
+  document.getElementById('at-name').textContent = p.name;
+  document.getElementById('at-date').value  = new Date().toISOString().slice(0,10);
+  document.getElementById('at-price').value = '';
+  document.getElementById('at-shares').value= '';
+  addToModal.show();
+}
+
+async function submitAddTo() {
+  const id = document.getElementById('at-id').value;
+  const body = {
+    trade_date: document.getElementById('at-date').value,
+    price:      parseFloat(document.getElementById('at-price').value),
+    shares:     parseInt(document.getElementById('at-shares').value),
+  };
+  if (!body.price || !body.shares) { alert('请填写补仓价和份额'); return; }
+  addToModal.hide();
+  showLoading('处理补仓...');
+  try {
+    const data = await api('POST', `/api/positions/${id}/add`, body);
+    if (data.error) { alert('补仓失败：' + data.error); return; }
+    await loadPortfolio();
+  } finally { hideLoading(); }
+}
+
+// ── 减仓/平仓 ──
+
+function showSellModal(p) {
+  document.getElementById('sl-id').value    = p.id;
+  document.getElementById('sl-name').textContent = p.name;
+  document.getElementById('sl-date').value  = new Date().toISOString().slice(0,10);
+  document.getElementById('sl-price').value = '';
+  document.getElementById('sl-shares').value= '';
+  document.getElementById('sl-max-shares').value = p.shares;
+  document.getElementById('sl-max-label').textContent = p.shares;
+  sellModal.show();
+}
+
+async function submitSell() {
+  const id     = document.getElementById('sl-id').value;
+  const maxSh  = parseInt(document.getElementById('sl-max-shares').value);
+  const sharesVal = document.getElementById('sl-shares').value;
+  const body = {
+    trade_date: document.getElementById('sl-date').value,
+    price:      parseFloat(document.getElementById('sl-price').value),
+    shares:     sharesVal ? parseInt(sharesVal) : maxSh,
+  };
+  if (!body.price) { alert('请填写卖出价'); return; }
+  if (body.shares > maxSh) { alert(`卖出份额不能超过持仓份额 ${maxSh}`); return; }
+  sellModal.hide();
+  showLoading('处理卖出...');
+  try {
+    const data = await api('POST', `/api/positions/${id}/sell`, body);
+    if (data.error) { alert('卖出失败：' + data.error); return; }
+    await loadPortfolio();
+    if (data.closed) loadHistory();
+  } finally { hideLoading(); }
+}
+
+// ── 编辑风控 ──
+
+function showEditModal(p) {
+  document.getElementById('e-id').value    = p.id;
+  document.getElementById('e-sl').value    = p.stop_loss;
+  document.getElementById('e-tp').value    = p.take_profit;
+  document.getElementById('e-notes').value = p.notes || '';
+  editModal.show();
+}
+async function submitEdit() {
+  const id = document.getElementById('e-id').value;
+  const body = {
+    stop_loss:   parseFloat(document.getElementById('e-sl').value),
+    take_profit: parseFloat(document.getElementById('e-tp').value),
+    notes:       document.getElementById('e-notes').value,
+  };
+  editModal.hide();
+  await api('PATCH', `/api/positions/${id}`, body);
+  await loadPortfolio();
+}
+
+// ── 盘后复盘 ──
+
+async function runReview() {
+  showLoading('正在对所有持仓执行盘后复盘...');
+  try {
+    const results = await api('POST', '/api/positions/review');
+    if (results.error) { alert('复盘失败：' + results.error); return; }
+    await loadPortfolio();
+    const panel = document.getElementById('review-panel');
+    const list  = document.getElementById('review-list');
+    document.getElementById('review-date').textContent = new Date().toLocaleDateString();
+    list.innerHTML = '';
+    if (!results.length) {
+      list.innerHTML = '<div class="text-muted">暂无持仓复盘数据</div>';
+    } else {
+      results.forEach(r => {
+        const recCls = { clear:'clear', move_sl_up:'move', tighten_tp:'tighten', hold:'hold' }[r.recommendation] || 'hold';
+        list.insertAdjacentHTML('beforeend', `
+          <div class="review-item ${recCls}">
+            <strong>[${r.code}] ${r.name}</strong>
+            &nbsp;|&nbsp; 评分 <span class="badge bg-${scoreColor(r.current_score)}">${r.current_score}</span>
+            &nbsp;|&nbsp; ${pnlSpan(r.pnl_pct)}
+            &nbsp;|&nbsp; ${recLabel(r.recommendation)}
+            <div class="text-muted small mt-1">${r.reason}</div>
+            ${r.new_stop_loss  ? `<div class="small">建议新止损：<strong>${r.new_stop_loss}</strong></div>`  : ''}
+            ${r.new_take_profit? `<div class="small">建议新止盈：<strong>${r.new_take_profit}</strong></div>`: ''}
+          </div>`);
+      });
+    }
+    panel.classList.remove('d-none');
+  } finally { hideLoading(); }
+}
+
+// ── Tab3: 交易历史 ────────────────────────────────────────
+
+async function loadHistory() {
+  const data = await api('GET', '/api/history');
+  const tbody = document.getElementById('history-body');
+  tbody.innerHTML = '';
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无已平仓记录</td></tr>';
+    document.getElementById('history-summary').classList.add('d-none');
+    return;
+  }
+  data.forEach(r => {
+    tbody.insertAdjacentHTML('beforeend', `
+      <tr>
+        <td>${r.code}</td>
+        <td>${r.name}</td>
+        <td>${r.buy_date}</td>
+        <td>${r.close_date || '-'}</td>
+        <td>${r.holding_days ?? '-'}</td>
+        <td>${r.total_sold ?? '-'}</td>
+        <td>${r.avg_buy_price?.toFixed(4) ?? '-'}</td>
+        <td>${r.avg_sell_price?.toFixed(4) ?? '-'}</td>
+        <td>${pnlAmtSpan(r.total_pnl)}</td>
+        <td>${pnlSpan(r.total_pnl_pct)}</td>
+      </tr>`);
+  });
+
+  // 汇总统计
+  const wins = data.filter(r => (r.total_pnl ?? 0) > 0).length;
+  const totalPnl = data.reduce((s, r) => s + (r.total_pnl ?? 0), 0);
+  const avgDays = data.filter(r => r.holding_days).reduce((s,r,_,a) => s + r.holding_days/a.length, 0);
+  document.getElementById('s-total').textContent   = data.length;
+  document.getElementById('s-winrate').textContent  = `${(wins/data.length*100).toFixed(1)}%`;
+  document.getElementById('s-pnl').innerHTML        = pnlAmtSpan(totalPnl);
+  document.getElementById('s-days').textContent     = avgDays.toFixed(1) + ' 天';
+  document.getElementById('history-summary').classList.remove('d-none');
+}
+
+// ── 初始化 ────────────────────────────────────────────────
+loadMarket();
+loadPortfolio();
+</script>
+</body>
+</html>
