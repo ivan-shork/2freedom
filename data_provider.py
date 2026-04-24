@@ -161,7 +161,7 @@ def _get_pro() -> ts.pro_api:
             )
         ts.set_token(token)
         _pro = ts.pro_api()
-        _pro._DataApi__http_url = "http://101.353.233.113:8020/"
+        _pro._DataApi__http_url = "http://101.35.233.113:8020/"
         df = _pro.index_basic(limit=5)
         print(df)
         logger.info("Tushare Pro API 初始化成功")
@@ -183,7 +183,7 @@ def get_etf_pool(top_n: int = ETF_POOL_SIZE) -> list[dict]:
     """获取优质流动性ETF池，返回 [{code, name, ts_code}]"""
     # 缓存命中直接返回
     cached = _load_pool_cache()
-    if cached is not None and len(cached) == top_n:
+    if cached is not None:
         return cached
 
     pro = _get_pro()
@@ -295,7 +295,7 @@ def get_index_daily(ts_code: str = "000001.SH") -> pd.DataFrame:
         return cached_df
 
     pro = _get_pro()
-    start_date = (datetime.now() - timedelta(days=150)).strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=420)).strftime("%Y%m%d")
     df = pro.index_daily(
         ts_code=ts_code,
         start_date=start_date,
