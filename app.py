@@ -6,11 +6,12 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 
-from config import ETF_POOL_SIZE
+from config import ETF_POOL_SIZE, STOP_LOSS_ATR_MULT, TAKE_PROFIT_ATR_MULT, TRAILING_ACTIVATE_ATR_MULT
 from database import (
     add_position,
     add_to_position,
     delete_position,
+    get_etf_name,
     get_history,
     get_position_by_id,
     get_positions,
@@ -22,9 +23,11 @@ from database import (
     sell_position,
     update_position,
 )
+from indicators import calc_all_indicators
 from main import fetch_all_etf_data, daily_scan
-from position_manager import compute_initial_risk, review_all_positions
-from strategy import detect_market_regime
+from position_manager import compute_initial_risk, review_all_positions, _infer_ts_code
+from strategy import detect_market_regime, score_buy_signal, determine_action
+from data_provider import fetch_etf_history
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +226,87 @@ def api_get_reviews(pos_id: int):
 @app.get("/api/history")
 def api_history():
     return jsonify(get_history())
+
+
+# ── Tab5：单只ETF分析 ────────────────────────────────────
+
+@app.get("/api/analyze")
+def api_analyze():
+    code = (request.args.get("code") or "").strip()
+    if not code:
+        return jsonify({"error": "缺少 code 参数"}), 400
+
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        name = get_etf_name(code) or code
+
+    date_str = (request.args.get("date") or "").strip()
+
+    ts_code = _infer_ts_code(code)
+    result = fetch_etf_history(code, name, ts_code)
+    if result is None:
+        return jsonify({"error": f"无法获取 {code} 数据，请确认代码正确且有数据"}), 400
+
+    _, _, df_raw = result
+    if df_raw is None or len(df_raw) < 30:
+        return jsonify({"error": f"{code} 历史数据不足，无法分析"}), 400
+
+    if date_str:
+        date_ts = date_str.replace("-", "")
+        df_raw = df_raw[df_raw["日期"].astype(str) <= date_ts]
+        if len(df_raw) < 30:
+            return jsonify({"error": f"{code} 在 {date_str} 前数据不足（少于30条），无法分析"}), 400
+
+    df = calc_all_indicators(df_raw)
+    last = df.iloc[-1]
+
+    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea",
+                "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "atr", "vol_ma5"]
+    if last[required].isna().any():
+        return jsonify({"error": f"{code} 指标计算含 NaN，数据可能不足"}), 400
+
+    score, details = score_buy_signal(df)
+    market = detect_market_regime()
+    action = determine_action(score, market)
+
+    price = float(last["收盘"])
+    atr = float(last["atr"])
+    vol = float(last["成交量"])
+    vol_ma5 = float(last["vol_ma5"])
+
+    return jsonify({
+        "code": code,
+        "name": name,
+        "score": score,
+        "action": action,
+        "details": details,
+        "market": {
+            "regime": market.regime,
+            "score": market.score,
+            "description": market.description,
+        },
+        "indicators": {
+            "price": round(price, 3),
+            "atr": round(atr, 4),
+            "ma5":  round(float(last["ma5"]),  3),
+            "ma10": round(float(last["ma10"]), 3),
+            "ma20": round(float(last["ma20"]), 3),
+            "ma60": round(float(last["ma60"]), 3),
+            "macd_dif":  round(float(last["macd_dif"]),  4),
+            "macd_dea":  round(float(last["macd_dea"]),  4),
+            "macd_hist": round(float(last["macd_hist"]), 4),
+            "rsi": round(float(last["rsi"]), 2),
+            "boll_upper": round(float(last["boll_upper"]), 3),
+            "boll_mid":   round(float(last["boll_mid"]),   3),
+            "boll_lower": round(float(last["boll_lower"]), 3),
+            "vol_ratio": round(vol / vol_ma5, 2) if vol_ma5 > 0 else None,
+        },
+        "risk": {
+            "stop_loss":        round(price - STOP_LOSS_ATR_MULT    * atr, 3),
+            "take_profit":      round(price + TAKE_PROFIT_ATR_MULT  * atr, 3),
+            "trailing_activate":round(price + TRAILING_ACTIVATE_ATR_MULT * atr, 3),
+        },
+    })
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-portfolio" onclick="loadPortfolio()">持仓管理</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-history" onclick="loadHistory()">交易历史</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-scan-history" onclick="loadScanHistory()">信号历史</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-analyze">单只分析</button></li>
   </ul>
 
   <div class="tab-content">
@@ -132,6 +133,42 @@
           <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">胜率</div><div id="s-winrate" class="fw-bold">-</div></div></div>
           <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">累计盈亏</div><div id="s-pnl" class="fw-bold">-</div></div></div>
           <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">平均持仓天数</div><div id="s-days" class="fw-bold">-</div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════════════ Tab5: 单只分析 ══════════════ -->
+    <div class="tab-pane fade" id="tab-analyze">
+      <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+        <input id="az-code" class="form-control form-control-sm" style="width:130px" placeholder="ETF代码 如 510050"
+               onkeydown="if(event.key==='Enter')runAnalyze()">
+        <input id="az-date" type="date" class="form-control form-control-sm" style="width:150px"
+               title="可选：分析指定日期（不填则分析最新数据）">
+        <button class="btn btn-sm btn-primary" onclick="runAnalyze()">▶ 分析</button>
+        <span id="az-status" class="text-muted small"></span>
+      </div>
+      <div id="az-result" class="d-none">
+        <!-- 基本信息行 -->
+        <div class="mb-2"><span id="az-title" class="fw-bold fs-5"></span></div>
+        <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+          <div id="az-score-badge" class="badge fs-5"></div>
+          <div id="az-action-badge" class="badge fs-6"></div>
+          <div id="az-market-badge" class="badge fs-6 bg-secondary"></div>
+          <span id="az-date-label" class="text-muted small"></span>
+        </div>
+        <!-- 分数维度展开 -->
+        <div class="card mb-3">
+          <div class="card-header py-1 fw-semibold small">评分分解</div>
+          <div class="card-body py-2" id="az-breakdown"></div>
+        </div>
+        <!-- 指标卡片网格 -->
+        <div class="row g-2 mb-3" id="az-indicators"></div>
+        <!-- 风控参考 -->
+        <div class="card">
+          <div class="card-header py-1 fw-semibold small">风控参考价位（基于当前收盘价 + ATR）</div>
+          <div class="card-body py-2">
+            <div class="row g-2" id="az-risk"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -436,7 +473,7 @@ async function loadPortfolio() {
 
     tbody.insertAdjacentHTML('beforeend', `
       <tr>
-        <td>${p.code}</td>
+        <td><a href="#" class="text-decoration-none" onclick="analyzeCode('${p.code}','${escHtml(p.name)}');return false;">${p.code}</a></td>
         <td>${p.name}</td>
         <td>${p.buy_date}</td>
         <td>${p.buy_price.toFixed(4)}</td>
@@ -773,6 +810,133 @@ function toggleHistDetail(btn, id) {
   const row = document.getElementById(id);
   const nowHidden = row.classList.toggle('d-none');
   btn.textContent = nowHidden ? '▶' : '▼';
+}
+
+// ── Tab5: 单只ETF分析 ─────────────────────────────────────
+
+async function runAnalyze(overrideCode, overrideName) {
+  const code = overrideCode || document.getElementById('az-code').value.trim();
+  if (!code) { alert('请输入 ETF 代码'); return; }
+  const dateVal = document.getElementById('az-date').value.trim();
+  const statusEl = document.getElementById('az-status');
+  statusEl.textContent = '分析中...';
+  document.getElementById('az-result').classList.add('d-none');
+
+  let url = `/api/analyze?code=${encodeURIComponent(code)}`;
+  if (overrideName) url += `&name=${encodeURIComponent(overrideName)}`;
+  if (dateVal) url += `&date=${encodeURIComponent(dateVal)}`;
+  const data = await api('GET', url);
+
+  if (data.error) { statusEl.textContent = '错误：' + data.error; return; }
+  statusEl.textContent = '';
+  renderAnalyzeResult(data, dateVal);
+}
+
+function analyzeCode(code, name) {
+  const tabBtn = document.querySelector('[data-bs-target="#tab-analyze"]');
+  bootstrap.Tab.getOrCreateInstance(tabBtn).show();
+  document.getElementById('az-code').value = code;
+  document.getElementById('az-date').value = '';
+  runAnalyze(code, name);
+}
+
+function renderAnalyzeResult(d, dateVal) {
+  const ind = d.indicators;
+  const risk = d.risk;
+
+  // 标题：名称 + 代码 + 当前价
+  const dateLabel = dateVal ? ` · ${dateVal}` : ' · 最新数据';
+  document.getElementById('az-title').textContent =
+    `${d.name}（${d.code}）  当前价 ${Number(ind.price).toFixed(3)}`;
+  document.getElementById('az-date-label').textContent = dateLabel;
+
+  // 基本信息
+  const scoreBadge = document.getElementById('az-score-badge');
+  scoreBadge.className = `badge fs-5 bg-${scoreColor(d.score)}`;
+  scoreBadge.textContent = `${d.score} 分`;
+
+  const actionMap = { strong_buy:'强烈买入', buy:'买入观察', hold:'观望', sell:'卖出/清仓' };
+  const actionColor = { strong_buy:'success', buy:'primary', hold:'secondary', sell:'danger' };
+  const actionBadge = document.getElementById('az-action-badge');
+  actionBadge.className = `badge fs-6 bg-${actionColor[d.action] || 'secondary'}`;
+  actionBadge.textContent = actionMap[d.action] || d.action;
+
+  const regimeColor = { bull:'success', bear:'danger', sideways:'warning' }[d.market.regime] || 'secondary';
+  const regimeLabel = { bull:'牛市', bear:'熊市', sideways:'震荡市' }[d.market.regime] || d.market.regime;
+  const mktBadge = document.getElementById('az-market-badge');
+  mktBadge.className = `badge fs-6 bg-${regimeColor}`;
+  mktBadge.textContent = `市场：${regimeLabel}（${Number(d.market.score).toFixed(2)}）`;
+
+  // 评分分解（复用 renderScoreBreakdown）
+  document.getElementById('az-breakdown').innerHTML =
+    renderScoreBreakdown(d.details, d.score, ind.atr.toFixed(4),
+      Number(risk.stop_loss).toFixed(3), Number(risk.take_profit).toFixed(3));
+
+  // 指标卡片
+  const maAligned = ind.ma5 > ind.ma10 && ind.ma10 > ind.ma20 && ind.ma20 > ind.ma60;
+  const maPartial = ind.ma5 > ind.ma10 && ind.ma10 > ind.ma20;
+  const maStatus = maAligned ? '<span class="text-success">完全多头</span>'
+                 : maPartial ? '<span class="text-warning">三线多头</span>'
+                 : ind.price > ind.ma20 ? '<span class="text-secondary">站上MA20</span>'
+                 : '<span class="text-danger">趋势偏弱</span>';
+  const macdSign = ind.macd_dif > ind.macd_dea ? '✓ DIF > DEA' : '✗ DIF < DEA';
+  const macdColor = ind.macd_dif > ind.macd_dea ? 'text-success' : 'text-danger';
+  const rsiColor = ind.rsi >= 45 && ind.rsi <= 65 ? 'text-success'
+                 : ind.rsi < 30 || ind.rsi > 80 ? 'text-danger' : 'text-warning';
+  const volRatio = ind.vol_ratio != null ? ind.vol_ratio.toFixed(2) : 'N/A';
+  const volColor = ind.vol_ratio == null ? 'text-secondary'
+                 : ind.vol_ratio >= 1.2  ? 'text-success'
+                 : ind.vol_ratio < 0.8   ? 'text-danger' : 'text-secondary';
+  const bollPos = ind.price > ind.boll_upper ? '上轨之上（过热）'
+                : ind.price > ind.boll_mid   ? '中轨↑上轨（健康）'
+                : ind.price > ind.boll_lower ? '下轨↑中轨（弱）'
+                : '下轨之下（超卖）';
+  const bollColor = ind.price > ind.boll_mid && ind.price < ind.boll_upper ? 'text-success'
+                  : ind.price <= ind.boll_lower ? 'text-danger' : 'text-warning';
+
+  const cards = [
+    { title:'均线排列', body: `${maStatus}<br><small class="text-muted">MA5 ${ind.ma5} · MA10 ${ind.ma10} · MA20 ${ind.ma20} · MA60 ${ind.ma60}</small>` },
+    { title:'MACD',     body: `<span class="${macdColor}">${macdSign}</span><br><small class="text-muted">DIF ${ind.macd_dif.toFixed(4)} &nbsp;DEA ${ind.macd_dea.toFixed(4)} &nbsp;柱 ${ind.macd_hist.toFixed(4)}</small>` },
+    { title:'RSI(14)',  body: `<span class="${rsiColor} fw-bold">${ind.rsi}</span><br><small class="text-muted">${rsiZone(ind.rsi)}</small>` },
+    { title:'量能比',   body: `<span class="${volColor} fw-bold">${volRatio}x</span><br><small class="text-muted">成交量 / 5日均量</small>` },
+    { title:'布林带',   body: `<span class="${bollColor}">${bollPos}</span><br><small class="text-muted">上 ${ind.boll_upper} &nbsp;中 ${ind.boll_mid} &nbsp;下 ${ind.boll_lower}</small>` },
+    { title:'ATR(14)',  body: `<span class="fw-bold">${ind.atr}</span><br><small class="text-muted">日均波动幅度</small>` },
+  ];
+  document.getElementById('az-indicators').innerHTML = cards.map(c => `
+    <div class="col-6 col-md-4 col-lg-2">
+      <div class="card h-100 text-center py-2 px-1">
+        <div class="small text-muted mb-1">${c.title}</div>
+        <div style="font-size:.85rem;line-height:1.4">${c.body}</div>
+      </div>
+    </div>`).join('');
+
+  // 风控参考
+  document.getElementById('az-risk').innerHTML = `
+    <div class="col-auto"><div class="card px-3 py-2 text-center">
+      <div class="small text-muted">止损参考</div>
+      <div class="text-danger fw-bold">${Number(risk.stop_loss).toFixed(3)}</div>
+      <div class="small text-muted">收盘价 − 2×ATR</div>
+    </div></div>
+    <div class="col-auto"><div class="card px-3 py-2 text-center">
+      <div class="small text-muted">止盈参考</div>
+      <div class="text-success fw-bold">${Number(risk.take_profit).toFixed(3)}</div>
+      <div class="small text-muted">收盘价 + 3×ATR</div>
+    </div></div>
+    <div class="col-auto"><div class="card px-3 py-2 text-center">
+      <div class="small text-muted">移动止损启动</div>
+      <div class="text-primary fw-bold">${Number(risk.trailing_activate).toFixed(3)}</div>
+      <div class="small text-muted">收盘价 + 1×ATR</div>
+    </div></div>`;
+
+  document.getElementById('az-result').classList.remove('d-none');
+}
+
+function rsiZone(rsi) {
+  if (rsi < 30)  return '超卖区';
+  if (rsi < 45)  return '回暖区';
+  if (rsi < 65)  return '健康区（最佳入场）';
+  if (rsi <= 75) return '强势区';
+  return '超买区';
 }
 
 // ── 初始化 ────────────────────────────────────────────────

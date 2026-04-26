@@ -394,6 +394,22 @@ def save_scan_signals(
     return len(signals)
 
 
+def get_etf_name(code: str) -> str | None:
+    """从历史扫描信号或持仓记录中查找 ETF 名称"""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT name FROM scan_signals WHERE code = ? ORDER BY scan_date DESC LIMIT 1",
+            (code,),
+        ).fetchone()
+        if row:
+            return row["name"]
+        row = con.execute(
+            "SELECT name FROM positions WHERE code = ? LIMIT 1",
+            (code,),
+        ).fetchone()
+        return row["name"] if row else None
+
+
 def get_scan_dates(limit: int = 90) -> list[str]:
     """返回有扫描记录的日期列表，最近 limit 天，降序"""
     with _conn() as con:
