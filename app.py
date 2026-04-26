@@ -24,6 +24,7 @@ from database import (
     update_position,
 )
 from indicators import calc_all_indicators
+from backtest import BacktestEngine
 from main import fetch_all_etf_data, daily_scan
 from position_manager import compute_initial_risk, review_all_positions, _infer_ts_code
 from strategy import detect_market_regime, score_buy_signal, determine_action
@@ -226,6 +227,46 @@ def api_get_reviews(pos_id: int):
 @app.get("/api/history")
 def api_history():
     return jsonify(get_history())
+
+
+# ── Tab6：策略回测 ───────────────────────────────────────
+
+@app.post("/api/backtest")
+def api_backtest():
+    try:
+        market = detect_market_regime()
+        from data_provider import get_etf_pool
+        etf_pool = get_etf_pool(ETF_POOL_SIZE)
+        etf_data = fetch_all_etf_data(etf_pool)
+        result = BacktestEngine().run(etf_data, market)
+        return jsonify({
+            "metrics": {
+                "total_return":    result.total_return,
+                "annual_return":   result.annual_return,
+                "max_drawdown":    result.max_drawdown,
+                "sharpe_ratio":    result.sharpe_ratio,
+                "win_rate":        result.win_rate,
+                "total_trades":    result.total_trades,
+                "avg_holding_days":result.avg_holding_days,
+            },
+            "trades": [
+                {
+                    "code":        t.code,
+                    "name":        t.name,
+                    "entry_date":  t.entry_date,
+                    "entry_price": t.entry_price,
+                    "exit_date":   t.exit_date,
+                    "exit_price":  t.exit_price,
+                    "exit_reason": t.exit_reason,
+                    "pnl_pct":     t.pnl_pct,
+                }
+                for t in result.trades
+            ],
+            "equity_curve": result.equity_curve,
+        })
+    except Exception as e:
+        logging.exception("回测失败")
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Tab5：单只ETF分析 ────────────────────────────────────

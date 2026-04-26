@@ -61,6 +61,7 @@
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-history" onclick="loadHistory()">交易历史</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-scan-history" onclick="loadScanHistory()">信号历史</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-analyze">单只分析</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-backtest">策略回测</button></li>
   </ul>
 
   <div class="tab-content">
@@ -193,6 +194,44 @@
         </thead>
         <tbody id="hist-scan-body"></tbody>
       </table>
+    </div>
+
+    <!-- ══════════════ Tab6: 策略回测 ══════════════ -->
+    <div class="tab-pane fade" id="tab-backtest">
+      <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+        <button class="btn btn-primary" onclick="runBacktest()">▶ 开始回测</button>
+        <span class="text-muted small">基于当前 ETF 池近365天历史数据，复用当前策略评分体系（首次运行需拉取数据，约1~2分钟）</span>
+        <span id="bt-status" class="text-muted small"></span>
+      </div>
+
+      <div id="bt-result" class="d-none">
+        <!-- 绩效指标卡片 -->
+        <div class="row g-2 mb-4" id="bt-metrics"></div>
+
+        <!-- 资金曲线 -->
+        <div class="card mb-4">
+          <div class="card-header py-1 fw-semibold small">资金曲线</div>
+          <div class="card-body py-2">
+            <canvas id="bt-chart" height="80"></canvas>
+          </div>
+        </div>
+
+        <!-- 交易记录 -->
+        <div class="card">
+          <div class="card-header py-1 fw-semibold small">完整交易记录 <span id="bt-trade-count" class="text-muted fw-normal"></span></div>
+          <div class="table-responsive">
+            <table class="table table-hover table-sm mb-0">
+              <thead class="table-dark">
+                <tr>
+                  <th>代码</th><th>名称</th><th>入场日</th><th>入场价</th>
+                  <th>出场日</th><th>出场价</th><th>出场原因</th><th>持仓天数</th><th>盈亏%</th>
+                </tr>
+              </thead>
+              <tbody id="bt-trade-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -810,6 +849,150 @@ function toggleHistDetail(btn, id) {
   const row = document.getElementById(id);
   const nowHidden = row.classList.toggle('d-none');
   btn.textContent = nowHidden ? '▶' : '▼';
+}
+
+// ── Tab6: 策略回测 ────────────────────────────────────────
+
+async function runBacktest() {
+  const statusEl = document.getElementById('bt-status');
+  const btn = document.querySelector('#tab-backtest .btn-primary');
+  btn.disabled = true;
+  statusEl.textContent = '回测运行中，请稍候...';
+  document.getElementById('bt-result').classList.add('d-none');
+  showLoading('回测运行中，预计需要 1~2 分钟...');
+
+  const data = await api('POST', '/api/backtest', {});
+  hideLoading();
+  btn.disabled = false;
+
+  if (data.error) { statusEl.textContent = '错误：' + data.error; return; }
+  statusEl.textContent = '';
+  renderBacktestResult(data);
+}
+
+function renderBacktestResult(data) {
+  const m = data.metrics;
+
+  // 绩效指标卡片
+  const retColor  = m.total_return  >= 0 ? 'text-success' : 'text-danger';
+  const annColor  = m.annual_return  >= 0 ? 'text-success' : 'text-danger';
+  const ddColor   = 'text-danger';
+  const srColor   = m.sharpe_ratio  >= 1 ? 'text-success' : m.sharpe_ratio >= 0 ? 'text-warning' : 'text-danger';
+  const wrColor   = m.win_rate >= 50 ? 'text-success' : 'text-warning';
+
+  const metricCards = [
+    { label:'总收益率',     value:`<span class="${retColor} fw-bold">${m.total_return >= 0 ? '+' : ''}${m.total_return}%</span>` },
+    { label:'年化收益率',   value:`<span class="${annColor} fw-bold">${m.annual_return >= 0 ? '+' : ''}${m.annual_return}%</span>` },
+    { label:'最大回撤',     value:`<span class="${ddColor} fw-bold">-${m.max_drawdown}%</span>` },
+    { label:'夏普比率',     value:`<span class="${srColor} fw-bold">${m.sharpe_ratio}</span>` },
+    { label:'胜率',         value:`<span class="${wrColor} fw-bold">${m.win_rate}%</span>` },
+    { label:'总交易次数',   value:`<span class="fw-bold">${m.total_trades}</span>` },
+    { label:'平均持仓天数', value:`<span class="fw-bold">${m.avg_holding_days} 天</span>` },
+  ];
+  document.getElementById('bt-metrics').innerHTML = metricCards.map(c => `
+    <div class="col-6 col-md-3 col-lg-auto">
+      <div class="card px-3 py-2 text-center">
+        <div class="small text-muted">${c.label}</div>
+        <div style="font-size:1rem">${c.value}</div>
+      </div>
+    </div>`).join('');
+
+  // 资金曲线（Canvas 折线图）
+  drawEquityCurve(data.equity_curve);
+
+  // 交易记录
+  const exitReasonMap = {
+    take_profit:  '止盈',
+    stop_loss:    '止损',
+    trailing_stop:'移动止损',
+    signal_sell:  '信号卖出',
+    backtest_end: '回测结束',
+  };
+  const tbody = document.getElementById('bt-trade-body');
+  tbody.innerHTML = '';
+  data.trades.forEach(t => {
+    const days = Math.round((new Date(t.exit_date.slice(0,4)+'-'+t.exit_date.slice(4,6)+'-'+t.exit_date.slice(6,8))
+                           - new Date(t.entry_date.slice(0,4)+'-'+t.entry_date.slice(4,6)+'-'+t.entry_date.slice(6,8))) / 86400000);
+    const pnlCls = t.pnl_pct >= 0 ? 'pnl-pos' : 'pnl-neg';
+    const reasonBadge = {
+      take_profit:  'bg-success',
+      stop_loss:    'bg-danger',
+      trailing_stop:'bg-warning text-dark',
+      signal_sell:  'bg-secondary',
+      backtest_end: 'bg-light text-dark border',
+    }[t.exit_reason] || 'bg-secondary';
+    tbody.insertAdjacentHTML('beforeend', `
+      <tr>
+        <td>${t.code}</td>
+        <td>${t.name}</td>
+        <td>${fmtDate(t.entry_date)}</td>
+        <td>${t.entry_price}</td>
+        <td>${fmtDate(t.exit_date)}</td>
+        <td>${t.exit_price}</td>
+        <td><span class="badge ${reasonBadge}">${exitReasonMap[t.exit_reason] || t.exit_reason}</span></td>
+        <td>${days}</td>
+        <td><span class="${pnlCls}">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct}%</span></td>
+      </tr>`);
+  });
+  document.getElementById('bt-trade-count').textContent = `共 ${data.trades.length} 笔`;
+
+  document.getElementById('bt-result').classList.remove('d-none');
+}
+
+function fmtDate(d) {
+  if (!d || d.length !== 8) return d;
+  return `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`;
+}
+
+function drawEquityCurve(curve) {
+  const canvas = document.getElementById('bt-chart');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.offsetWidth || 800;
+  const H = canvas.offsetHeight || 180;
+  canvas.width = W;
+  canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+
+  if (curve.length < 2) return;
+
+  const minV = Math.min(...curve);
+  const maxV = Math.max(...curve);
+  const range = maxV - minV || 1;
+  const pad = { top: 10, bottom: 20, left: 10, right: 10 };
+  const w = W - pad.left - pad.right;
+  const h = H - pad.top - pad.bottom;
+
+  const xs = curve.map((_, i) => pad.left + (i / (curve.length - 1)) * w);
+  const ys = curve.map(v => pad.top + h - ((v - minV) / range) * h);
+
+  // 填充区域
+  const finalColor = curve[curve.length - 1] >= curve[0] ? '#19875440' : '#dc354540';
+  const lineColor  = curve[curve.length - 1] >= curve[0] ? '#198754'   : '#dc3545';
+  ctx.beginPath();
+  ctx.moveTo(xs[0], H - pad.bottom);
+  xs.forEach((x, i) => ctx.lineTo(x, ys[i]));
+  ctx.lineTo(xs[xs.length - 1], H - pad.bottom);
+  ctx.closePath();
+  ctx.fillStyle = finalColor;
+  ctx.fill();
+
+  // 折线
+  ctx.beginPath();
+  xs.forEach((x, i) => i === 0 ? ctx.moveTo(x, ys[i]) : ctx.lineTo(x, ys[i]));
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // 基准线（初始资金）
+  const y0 = pad.top + h - ((curve[0] - minV) / range) * h;
+  ctx.beginPath();
+  ctx.setLineDash([4, 4]);
+  ctx.moveTo(pad.left, y0);
+  ctx.lineTo(pad.left + w, y0);
+  ctx.strokeStyle = '#adb5bd';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 // ── Tab5: 单只ETF分析 ─────────────────────────────────────
