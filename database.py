@@ -332,6 +332,10 @@ def add_review(
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """
     with _conn() as con:
+        con.execute(
+            "DELETE FROM position_reviews WHERE position_id = ? AND review_date = ?",
+            (position_id, review_date),
+        )
         cur = con.execute(
             sql,
             (
@@ -348,11 +352,16 @@ def get_reviews(position_id: int, limit: int = 30) -> list[dict]:
     sql = """
         SELECT * FROM position_reviews
         WHERE position_id = ?
-        ORDER BY created_at DESC
+          AND id IN (
+              SELECT MAX(id) FROM position_reviews
+              WHERE position_id = ?
+              GROUP BY review_date
+          )
+        ORDER BY review_date DESC
         LIMIT ?
     """
     with _conn() as con:
-        rows = con.execute(sql, (position_id, limit)).fetchall()
+        rows = con.execute(sql, (position_id, position_id, limit)).fetchall()
     return [dict(r) for r in rows]
 
 
