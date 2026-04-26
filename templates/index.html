@@ -39,6 +39,8 @@
     .dim-bar-fill { height: 100%; border-radius: 4px; }
     .dim-pts { font-size: .8rem; font-weight: 700; min-width: 40px; text-align: right; }
     .dim-reason { font-size: .75rem; color: #6c757d; }
+    .review-history-row td { background: #f8f9fa; padding: 4px 16px !important; }
+    .review-history-row table { font-size: .8rem; }
   </style>
 </head>
 <body>
@@ -460,11 +462,55 @@ async function loadPortfolio() {
         <td class="text-nowrap">
           <button class="btn btn-sm btn-outline-secondary me-1" onclick='showEditModal(${pData})'>编辑</button>
           <button class="btn btn-sm btn-outline-warning me-1" onclick='showAddToModal(${pData})'>补仓</button>
-          <button class="btn btn-sm btn-outline-danger" onclick='showSellModal(${pData})'>卖出</button>
-          <button class="btn btn-sm btn-outline-dark" onclick='confirmDelete(${p.id},"${p.code} ${p.name}")'>删除</button>
+          <button class="btn btn-sm btn-outline-danger me-1" onclick='showSellModal(${pData})'>卖出</button>
+          <button class="btn btn-sm btn-outline-dark me-1" onclick='confirmDelete(${p.id},"${p.code} ${p.name}")'>删除</button>
+          <button class="btn btn-sm btn-outline-info" onclick='toggleReviewHistory(this,${p.id})'>复盘历史</button>
         </td>
-      </tr>`);
+      </tr>
+      <tr id="rev-${p.id}" class="d-none review-history-row"><td colspan="12"></td></tr>`);
   });
+}
+
+// ── 复盘历史展开 ──
+
+async function toggleReviewHistory(btn, posId) {
+  const row = document.getElementById('rev-' + posId);
+  const nowHidden = row.classList.toggle('d-none');
+  btn.textContent = nowHidden ? '复盘历史' : '收起历史';
+  if (!nowHidden && !row.dataset.loaded) {
+    const td = row.querySelector('td');
+    td.innerHTML = '<div class="p-2 text-muted small">加载中...</div>';
+    const reviews = await api('GET', `/api/positions/${posId}/reviews`);
+    td.innerHTML = renderReviewHistory(reviews);
+    row.dataset.loaded = '1';
+  }
+}
+
+function renderReviewHistory(reviews) {
+  if (!reviews.length) return '<div class="text-muted small p-2">暂无复盘记录</div>';
+  const stopMap = { stop_loss:'止损触及', take_profit:'止盈触及', trailing:'移动止损', time:'时间止损' };
+  const rows = reviews.map(r => {
+    const pnlStr = r.pnl_pct != null ? pnlSpan(r.pnl_pct) : '-';
+    const stopBadge = r.stop_triggered && r.stop_triggered !== 'none'
+      ? `<span class="badge bg-danger me-1">${stopMap[r.stop_triggered] || r.stop_triggered}</span>` : '';
+    return `<tr>
+      <td class="text-muted">${r.review_date}</td>
+      <td><span class="badge bg-${scoreColor(r.current_score)}">${r.current_score}</span></td>
+      <td>${Number(r.current_price).toFixed(3)}</td>
+      <td>${pnlStr}</td>
+      <td>${stopBadge}${recLabel(r.recommendation)}</td>
+      <td class="text-muted">${r.reason || '-'}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="py-1 px-2">
+      <table class="table table-sm table-borderless mb-0">
+        <thead class="text-muted border-bottom">
+          <tr><th>日期</th><th>评分</th><th>当时价</th><th>浮盈亏</th><th>建议</th><th>原因</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
 }
 
 // ── 添加持仓 ──
