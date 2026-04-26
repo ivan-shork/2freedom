@@ -10,11 +10,15 @@ from config import ETF_POOL_SIZE
 from database import (
     add_position,
     add_to_position,
+    delete_position,
     get_history,
     get_position_by_id,
     get_positions,
     get_reviews,
+    get_scan_dates,
+    get_scan_signals_by_date,
     init_db,
+    save_scan_signals,
     sell_position,
     update_position,
 )
@@ -58,31 +62,47 @@ def api_scan():
         etf_pool = get_etf_pool(ETF_POOL_SIZE)
         etf_data = fetch_all_etf_data(etf_pool)
         signals = daily_scan(etf_data, market)
+        signal_list = [
+            {
+                "code": s.code,
+                "name": s.name,
+                "score": s.score,
+                "price": s.price,
+                "action": s.action,
+                "atr": s.atr,
+                "stop_loss_price": s.stop_loss_price,
+                "take_profit_price": s.take_profit_price,
+                "trailing_activate_price": s.trailing_activate_price,
+                "details": s.details,
+            }
+            for s in signals
+        ]
+        scan_date = datetime.now().strftime("%Y-%m-%d")
+        save_scan_signals(scan_date, market.regime, market.score, signal_list)
         return jsonify({
             "market": {
                 "regime": market.regime,
                 "score": market.score,
                 "description": market.description,
             },
-            "signals": [
-                {
-                    "code": s.code,
-                    "name": s.name,
-                    "score": s.score,
-                    "price": s.price,
-                    "action": s.action,
-                    "atr": s.atr,
-                    "stop_loss_price": s.stop_loss_price,
-                    "take_profit_price": s.take_profit_price,
-                    "trailing_activate_price": s.trailing_activate_price,
-                    "details": s.details,
-                }
-                for s in signals
-            ],
+            "signals": signal_list,
         })
     except Exception as e:
         logging.exception("扫描失败")
         return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/scan_history/dates")
+def api_scan_history_dates():
+    return jsonify(get_scan_dates())
+
+
+@app.get("/api/scan_history")
+def api_scan_history():
+    scan_date = request.args.get("date")
+    if not scan_date:
+        return jsonify({"error": "缺少 date 参数"}), 400
+    return jsonify(get_scan_signals_by_date(scan_date))
 
 
 # ── Tab2：持仓管理 ────────────────────────────────────────
@@ -121,7 +141,7 @@ def api_add_position():
         stop_loss=stop_loss,
         take_profit=take_profit,
         initial_atr=risk["atr"],
-        trailing_activate=risk["trailing_activate"],
+        trailing_activate=round(buy_price + risk["atr"], 3),
         notes=data.get("notes", ""),
     )
     return jsonify({"id": pos_id, "risk": risk}), 201
@@ -135,6 +155,15 @@ def api_update_position(pos_id: int):
         return jsonify({"error": "无可更新字段"}), 400
     ok = update_position(pos_id, **fields)
     return jsonify({"ok": ok})
+
+
+@app.delete("/api/positions/<int:pos_id>")
+def api_delete_position(pos_id: int):
+    """删除持仓（误录入场景，同时删除关联复盘和流水）"""
+    ok = delete_position(pos_id)
+    if not ok:
+        return jsonify({"error": "持仓不存在"}), 404
+    return jsonify({"ok": True})
 
 
 @app.post("/api/positions/<int:pos_id>/add")

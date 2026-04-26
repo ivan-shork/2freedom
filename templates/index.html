@@ -30,6 +30,15 @@
     td, th { vertical-align: middle !important; }
     .pnl-pos { color: #198754; font-weight: 600; }
     .pnl-neg { color: #dc3545; font-weight: 600; }
+    .expand-btn { background: none; border: none; cursor: pointer; color: #6c757d; padding: 0 3px; font-size: .8rem; line-height: 1; }
+    .expand-btn:hover { color: #212529; }
+    .detail-row td { background: #f0f4ff; padding: 10px 20px !important; }
+    .score-dim { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+    .dim-label { font-size: .8rem; color: #495057; min-width: 72px; }
+    .dim-bar-wrap { flex: 1; max-width: 150px; height: 7px; background: #dee2e6; border-radius: 4px; overflow: hidden; }
+    .dim-bar-fill { height: 100%; border-radius: 4px; }
+    .dim-pts { font-size: .8rem; font-weight: 700; min-width: 40px; text-align: right; }
+    .dim-reason { font-size: .75rem; color: #6c757d; }
   </style>
 </head>
 <body>
@@ -48,6 +57,7 @@
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-scan">ETF 扫描</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-portfolio" onclick="loadPortfolio()">持仓管理</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-history" onclick="loadHistory()">交易历史</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-scan-history" onclick="loadScanHistory()">信号历史</button></li>
   </ul>
 
   <div class="tab-content">
@@ -64,6 +74,7 @@
       <table class="table table-hover table-sm d-none" id="scan-table">
         <thead class="table-dark">
           <tr>
+            <th style="width:26px"></th>
             <th>代码</th><th>名称</th><th>评分</th><th>当前价</th>
             <th>止损价</th><th>止盈价</th><th>信号</th><th>操作</th>
           </tr>
@@ -121,6 +132,28 @@
           <div class="col-auto"><div class="card px-3 py-2 text-center"><div class="small text-muted">平均持仓天数</div><div id="s-days" class="fw-bold">-</div></div></div>
         </div>
       </div>
+    </div>
+
+    <!-- ══════════════ Tab4: 信号历史 ══════════════ -->
+    <div class="tab-pane fade" id="tab-scan-history">
+      <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+        <select class="form-select form-select-sm" style="width:auto;min-width:150px" id="hist-date-select" onchange="loadScanByDate(this.value)">
+          <option value="">— 选择扫描日期 —</option>
+        </select>
+        <div id="hist-market-badge" class="badge bg-secondary d-none"></div>
+        <span id="hist-signal-count" class="text-muted small"></span>
+      </div>
+      <div id="hist-scan-empty" class="text-muted">请选择日期查看当日买入信号</div>
+      <table class="table table-hover table-sm d-none" id="hist-scan-table">
+        <thead class="table-dark">
+          <tr>
+            <th style="width:26px"></th>
+            <th>代码</th><th>名称</th><th>评分</th><th>当时价</th>
+            <th>止损价</th><th>止盈价</th><th>信号</th>
+          </tr>
+        </thead>
+        <tbody id="hist-scan-body"></tbody>
+      </table>
     </div>
 
   </div>
@@ -267,6 +300,54 @@ function pnlAmtSpan(v) {
 
 // ── Tab1: 市场环境 & 扫描 ─────────────────────────────────
 
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function parseDim(str) {
+  const m = String(str).match(/^([+-]?\d+)(?:\((.+)\))?/);
+  return m ? { pts: parseInt(m[1]), reason: m[2] || '' } : { pts: 0, reason: str };
+}
+
+function renderScoreBreakdown(details, score, atr, stopLoss, takeProfit) {
+  const dims = [
+    { key: 'trend_strength', label: '趋势强度', max: 30 },
+    { key: 'macd_momentum',  label: 'MACD动量',  max: 25 },
+    { key: 'rsi_zone',       label: 'RSI区间',   max: 20 },
+    { key: 'volume_surge',   label: '量能确认',  max: 15 },
+    { key: 'boll_support',   label: '布林带',    max: 10 },
+  ];
+  let dimsHtml = '';
+  dims.forEach(d => {
+    const { pts, reason } = parseDim(details[d.key] || '0');
+    const pct = (pts / d.max * 100).toFixed(0);
+    const color = pts === d.max ? '#198754' : pts > 0 ? '#fd7e14' : '#adb5bd';
+    dimsHtml += `
+      <div class="score-dim">
+        <span class="dim-label">${d.label}</span>
+        <div class="dim-bar-wrap"><div class="dim-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        <span class="dim-pts" style="color:${color}">${pts}<span class="text-muted fw-normal">/${d.max}</span></span>
+        <span class="dim-reason">${escHtml(reason)}</span>
+      </div>`;
+  });
+  return `
+    <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start">
+      <div>${dimsHtml}</div>
+      <div style="font-size:.8rem;color:#495057;border-left:1px solid #dee2e6;padding-left:16px;min-width:130px">
+        <div class="mb-1"><span class="text-muted">总评分</span> <strong>${score}/100</strong></div>
+        <div class="mb-1"><span class="text-muted">ATR</span> <strong>${atr}</strong></div>
+        <div class="mb-1"><span class="text-muted">止损价</span> <strong class="text-danger">${stopLoss}</strong></div>
+        <div><span class="text-muted">止盈价</span> <strong class="text-success">${takeProfit}</strong></div>
+      </div>
+    </div>`;
+}
+
+function toggleScanDetail(btn, i) {
+  const row = document.getElementById('sd-' + i);
+  const nowHidden = row.classList.toggle('d-none');
+  btn.textContent = nowHidden ? '▶' : '▼';
+}
+
 async function loadMarket() {
   const data = await api('GET', '/api/market_regime');
   if (data.error) return;
@@ -286,12 +367,13 @@ async function startScan() {
     const tbody = document.getElementById('scan-body');
     tbody.innerHTML = '';
     if (!data.signals.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center">今日无买入信号</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="text-center">今日无买入信号</td></tr>';
     } else {
       const actionMap = { strong_buy:'强烈买入', buy:'买入观察' };
-      data.signals.forEach(s => {
+      data.signals.forEach((s, i) => {
         tbody.insertAdjacentHTML('beforeend', `
           <tr>
+            <td><button class="expand-btn" onclick="toggleScanDetail(this,${i})">▶</button></td>
             <td>${s.code}</td><td>${s.name}</td>
             <td><span class="badge bg-${scoreColor(s.score)}">${s.score}</span></td>
             <td>${s.price.toFixed(3)}</td>
@@ -299,7 +381,10 @@ async function startScan() {
             <td class="text-success">${s.take_profit_price.toFixed(3)}</td>
             <td>${actionMap[s.action]||s.action}</td>
             <td><button class="btn btn-sm btn-outline-success" onclick='quickAdd(${JSON.stringify(s)})'>+ 录入</button></td>
-          </tr>`);
+          </tr>
+          <tr id="sd-${i}" class="d-none detail-row"><td colspan="9"></td></tr>`);
+        document.querySelector('#sd-' + i + ' td').innerHTML =
+          renderScoreBreakdown(s.details, s.score, s.atr, s.stop_loss_price.toFixed(3), s.take_profit_price.toFixed(3));
       });
     }
     document.getElementById('scan-table').classList.remove('d-none');
@@ -376,6 +461,7 @@ async function loadPortfolio() {
           <button class="btn btn-sm btn-outline-secondary me-1" onclick='showEditModal(${pData})'>编辑</button>
           <button class="btn btn-sm btn-outline-warning me-1" onclick='showAddToModal(${pData})'>补仓</button>
           <button class="btn btn-sm btn-outline-danger" onclick='showSellModal(${pData})'>卖出</button>
+          <button class="btn btn-sm btn-outline-dark" onclick='confirmDelete(${p.id},"${p.code} ${p.name}")'>删除</button>
         </td>
       </tr>`);
   });
@@ -495,6 +581,15 @@ async function submitEdit() {
   await loadPortfolio();
 }
 
+// ── 删除持仓 ──
+
+async function confirmDelete(id, label) {
+  if (!confirm(`确认删除「${label}」？\n此操作将同时删除关联的复盘记录和交易流水，不可恢复。`)) return;
+  const data = await api('DELETE', `/api/positions/${id}`);
+  if (data.error) { alert('删除失败：' + data.error); return; }
+  await loadPortfolio();
+}
+
 // ── 盘后复盘 ──
 
 async function runReview() {
@@ -564,6 +659,74 @@ async function loadHistory() {
   document.getElementById('s-pnl').innerHTML        = pnlAmtSpan(totalPnl);
   document.getElementById('s-days').textContent     = avgDays.toFixed(1) + ' 天';
   document.getElementById('history-summary').classList.remove('d-none');
+}
+
+// ── Tab4: 信号历史 ────────────────────────────────────────
+
+let _histLoaded = false;
+
+async function loadScanHistory() {
+  if (_histLoaded) return;
+  _histLoaded = true;
+  const dates = await api('GET', '/api/scan_history/dates');
+  const sel = document.getElementById('hist-date-select');
+  if (!dates.length) {
+    sel.insertAdjacentHTML('beforeend', '<option disabled>暂无历史记录</option>');
+    return;
+  }
+  dates.forEach(d => sel.insertAdjacentHTML('beforeend', `<option value="${d}">${d}</option>`));
+  sel.value = dates[0];
+  await loadScanByDate(dates[0]);
+}
+
+async function loadScanByDate(date) {
+  if (!date) return;
+  const data = await api('GET', `/api/scan_history?date=${date}`);
+  const tbody = document.getElementById('hist-scan-body');
+  const badge  = document.getElementById('hist-market-badge');
+  const countEl = document.getElementById('hist-signal-count');
+  const actionMap = { strong_buy:'强烈买入', buy:'买入观察' };
+  tbody.innerHTML = '';
+
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">该日无信号记录</td></tr>';
+    badge.classList.add('d-none');
+    countEl.textContent = '';
+  } else {
+    const first = data[0];
+    const regimeColor = { bull:'success', bear:'danger', sideways:'warning' }[first.market_regime] || 'secondary';
+    const regimeLabel = { bull:'牛市', bear:'熊市', sideways:'震荡市' }[first.market_regime] || first.market_regime;
+    badge.className = `badge bg-${regimeColor}`;
+    badge.textContent = `${regimeLabel}（${Number(first.market_score).toFixed(2)}）`;
+    badge.classList.remove('d-none');
+    countEl.textContent = `共 ${data.length} 条信号`;
+
+    data.forEach((s, i) => {
+      const hid = `hsd-${i}`;
+      tbody.insertAdjacentHTML('beforeend', `
+        <tr>
+          <td><button class="expand-btn" onclick="toggleHistDetail(this,'${hid}')">▶</button></td>
+          <td>${s.code}</td><td>${s.name}</td>
+          <td><span class="badge bg-${scoreColor(s.score)}">${s.score}</span></td>
+          <td>${Number(s.price).toFixed(3)}</td>
+          <td class="text-danger">${Number(s.stop_loss_price).toFixed(3)}</td>
+          <td class="text-success">${Number(s.take_profit_price).toFixed(3)}</td>
+          <td>${actionMap[s.action] || s.action}</td>
+        </tr>
+        <tr id="${hid}" class="d-none detail-row"><td colspan="8"></td></tr>`);
+      document.querySelector('#' + hid + ' td').innerHTML =
+        renderScoreBreakdown(s.details, s.score, s.atr,
+          Number(s.stop_loss_price).toFixed(3), Number(s.take_profit_price).toFixed(3));
+    });
+  }
+  document.getElementById('hist-scan-table').classList.remove('d-none');
+  document.getElementById('hist-scan-empty').classList.add('d-none');
+}
+
+function toggleHistDetail(btn, id) {
+  const row = document.getElementById(id);
+  const nowHidden = row.classList.toggle('d-none');
+  btn.textContent = nowHidden ? '▶' : '▼';
 }
 
 // ── 初始化 ────────────────────────────────────────────────

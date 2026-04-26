@@ -62,6 +62,27 @@ CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_reviews_position ON position_reviews(position_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_date     ON position_reviews(review_date);
 CREATE INDEX IF NOT EXISTS idx_trades_position  ON trades(position_id);
+
+CREATE TABLE IF NOT EXISTS scan_signals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_date         TEXT    NOT NULL,
+    code              TEXT    NOT NULL,
+    name              TEXT    NOT NULL,
+    score             INTEGER NOT NULL,
+    price             REAL    NOT NULL,
+    action            TEXT    NOT NULL,
+    atr               REAL    NOT NULL,
+    stop_loss_price   REAL    NOT NULL,
+    take_profit_price REAL    NOT NULL,
+    market_regime     TEXT    NOT NULL,
+    market_score      REAL    NOT NULL,
+    details_json      TEXT    NOT NULL,
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_date_code  ON scan_signals(scan_date, code);
+CREATE INDEX IF NOT EXISTS idx_scan_signals_date      ON scan_signals(scan_date);
+CREATE INDEX IF NOT EXISTS idx_scan_signals_code      ON scan_signals(code);
 """
 
 
@@ -117,6 +138,15 @@ def add_position(
             (pos_id, buy_date, "buy", buy_price, shares, buy_price),
         )
         return pos_id
+
+
+def delete_position(position_id: int) -> bool:
+    """删除持仓及其关联的复盘记录和交易流水（误录入场景）"""
+    with _conn() as con:
+        con.execute("DELETE FROM position_reviews WHERE position_id = ?", (position_id,))
+        con.execute("DELETE FROM trades WHERE position_id = ?", (position_id,))
+        cur = con.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+    return cur.rowcount > 0
 
 
 def get_positions(status: str = "open") -> list[dict]:
@@ -324,3 +354,58 @@ def get_reviews(position_id: int, limit: int = 30) -> list[dict]:
     with _conn() as con:
         rows = con.execute(sql, (position_id, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+# =================== scan_signals ===================
+
+def save_scan_signals(
+    scan_date: str,
+    market_regime: str,
+    market_score: float,
+    signals: list[dict],
+) -> int:
+    """保存当日扫描信号，同一天同一标的重复扫描自动覆盖"""
+    sql = """
+        INSERT OR REPLACE INTO scan_signals
+            (scan_date, code, name, score, price, action, atr,
+             stop_loss_price, take_profit_price, market_regime, market_score, details_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    """
+    with _conn() as con:
+        con.executemany(sql, [
+            (
+                scan_date,
+                s["code"], s["name"], s["score"], s["price"],
+                s["action"], s["atr"], s["stop_loss_price"], s["take_profit_price"],
+                market_regime, market_score,
+                json.dumps(s["details"], ensure_ascii=False),
+            )
+            for s in signals
+        ])
+    return len(signals)
+
+
+def get_scan_dates(limit: int = 90) -> list[str]:
+    """返回有扫描记录的日期列表，最近 limit 天，降序"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT DISTINCT scan_date FROM scan_signals ORDER BY scan_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [r["scan_date"] for r in rows]
+
+
+def get_scan_signals_by_date(scan_date: str) -> list[dict]:
+    """获取指定日期的扫描信号，按评分降序"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM scan_signals WHERE scan_date = ? ORDER BY score DESC",
+            (scan_date,),
+        ).fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        row["details"] = json.loads(row["details_json"])
+        del row["details_json"]
+        result.append(row)
+    return result

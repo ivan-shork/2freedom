@@ -161,9 +161,6 @@ def _get_pro() -> ts.pro_api:
             )
         ts.set_token(token)
         _pro = ts.pro_api()
-        _pro._DataApi__http_url = "http://101.35.233.113:8020/"
-        df = _pro.index_basic(limit=5)
-        print(df)
         logger.info("Tushare Pro API 初始化成功")
     return _pro
 

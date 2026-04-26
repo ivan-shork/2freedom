@@ -69,8 +69,10 @@ def review_position(pos: dict) -> dict | None:
     pnl_pct = round((current_price - buy_price) / buy_price * 100, 2)
 
     # 持仓期内最高价（用于移动止损判断）
-    df_since_buy = df[df["日期"].astype(str) >= buy_date]
-    recent_high = float(df_since_buy["收盘"].max()) if not df_since_buy.empty else current_price
+    # 注：Tushare 日期格式为 YYYYMMDD，buy_date 为 YYYY-MM-DD，需统一后再比较
+    buy_date_ts = buy_date.replace("-", "")
+    df_since_buy = df[df["日期"].astype(str) >= buy_date_ts]
+    recent_high = float(df_since_buy["最高"].max()) if not df_since_buy.empty else current_price
 
     initial_atr = float(pos["initial_atr"])
     stop_loss = float(pos["stop_loss"])
