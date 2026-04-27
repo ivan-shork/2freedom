@@ -4,6 +4,7 @@
 输出列名与原akshare版本保持一致，下游代码无需修改。
 
 支持本地缓存：同一自然日内历史数据不变，缓存后跳过API调用。
+前复权通过 fund_adj 接口获取复权因子，公式：price × adj_factor / latest_adj_factor。
 """
 
 import json
@@ -220,12 +221,62 @@ def get_etf_pool(top_n: int = ETF_POOL_SIZE) -> list[dict]:
     return pool
 
 
+def lookup_etf_info(code: str) -> tuple[str, str] | None:
+    """通过6位代码查找ETF的正确 ts_code 和名称。
+    优先查当日池子缓存，未命中则调用 fund_basic 接口。
+    返回 (ts_code, name)，找不到返回 None。
+    """
+    # 先查当日池子缓存（今天扫描过则命中）
+    cached_pool = _load_pool_cache()
+    if cached_pool:
+        for item in cached_pool:
+            if item["code"] == code:
+                return item["ts_code"], item["name"]
+
+    # 池子里没有，调 fund_basic 查全量列表
+    try:
+        pro = _get_pro()
+        df = pro.fund_basic(market="E", status="L")[["ts_code", "name"]]
+        df["code"] = df["ts_code"].str[:6]
+        match = df[df["code"] == code]
+        if not match.empty:
+            row = match.iloc[0]
+            return str(row["ts_code"]), str(row["name"])
+    except Exception as e:
+        logger.warning("查询ETF信息失败 %s: %s", code, e)
+
+    return None
+
+
+
+def _apply_qfq(df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataFrame:
+    """用 fund_adj 复权因子做前复权。
+
+    公式: qfq_price = original_price * adj_factor / latest_adj_factor
+    成交量不调整。
+    """
+    if adj_df is None or adj_df.empty:
+        return df
+    df = df.copy()
+    adj_map = dict(zip(adj_df["trade_date"], adj_df["adj_factor"]))
+    df["adj_factor"] = df["日期"].map(adj_map)
+    if df["adj_factor"].isna().any():
+        df["adj_factor"] = df["adj_factor"].ffill().bfill()
+    latest_factor = df["adj_factor"].iloc[-1]
+    ratio = df["adj_factor"] / latest_factor
+    for col in ["开盘", "最高", "最低", "收盘"]:
+        df[col] = df[col] * ratio
+    df = df.drop(columns=["adj_factor"])
+    return df
+
+
 def fetch_etf_history(
     code: str, name: str, ts_code: str
 ) -> tuple[str, str, pd.DataFrame] | None:
     """获取单只ETF历史日线数据，带重试。
 
     返回 DataFrame 列名：日期 / 开盘 / 最高 / 最低 / 收盘 / 成交量
+    价格已通过 fund_adj 复权因子做前复权处理。
     """
     # 缓存命中直接返回
     cached_df = _load_etf_cache(ts_code)
@@ -266,6 +317,20 @@ def fetch_etf_history(
 
             if len(df) < 30:
                 return None
+
+            # 获取复权因子并做前复权
+            try:
+                adj_df = pro.fund_adj(
+                    ts_code=ts_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                df = _apply_qfq(df, adj_df)
+            except Exception as adj_err:
+                logger.warning(
+                    "%s %s 获取复权因子失败，使用未复权数据: %s",
+                    code, name, adj_err,
+                )
 
             # 写入缓存
             _save_etf_cache(ts_code, df)
