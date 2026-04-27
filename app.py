@@ -11,7 +11,6 @@ from database import (
     add_position,
     add_to_position,
     delete_position,
-    get_etf_name,
     get_history,
     get_position_by_id,
     get_positions,
@@ -26,9 +25,9 @@ from database import (
 from indicators import calc_all_indicators
 from backtest import BacktestEngine
 from main import fetch_all_etf_data, daily_scan
-from position_manager import compute_initial_risk, review_all_positions, _infer_ts_code
+from position_manager import compute_initial_risk, review_all_positions
 from strategy import detect_market_regime, score_buy_signal, determine_action
-from data_provider import fetch_etf_history
+from data_provider import fetch_etf_history, lookup_etf_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -277,16 +276,21 @@ def api_analyze():
     if not code:
         return jsonify({"error": "缺少 code 参数"}), 400
 
+    # 优先用前端传入的名称（从持仓点击过来时有值）
     name = (request.args.get("name") or "").strip()
-    if not name:
-        name = get_etf_name(code) or code
-
     date_str = (request.args.get("date") or "").strip()
 
-    ts_code = _infer_ts_code(code)
+    # 通过 Tushare 验证 ts_code 和名称，避免 _infer_ts_code 猜错交易所后缀
+    etf_info = lookup_etf_info(code)
+    if etf_info is None:
+        return jsonify({"error": f"找不到代码 {code} 对应的ETF，请确认代码正确"}), 400
+    ts_code, fetched_name = etf_info
+    if not name:
+        name = fetched_name
+
     result = fetch_etf_history(code, name, ts_code)
     if result is None:
-        return jsonify({"error": f"无法获取 {code} 数据，请确认代码正确且有数据"}), 400
+        return jsonify({"error": f"无法获取 {code} 历史数据"}), 400
 
     _, _, df_raw = result
     if df_raw is None or len(df_raw) < 30:

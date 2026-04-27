@@ -59,7 +59,7 @@
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-scan">ETF 扫描</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-portfolio" onclick="loadPortfolio()">持仓管理</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-history" onclick="loadHistory()">交易历史</button></li>
-    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-scan-history" onclick="loadScanHistory()">信号历史</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-scan-history" onclick="refreshScanHistoryDates()">信号历史</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-analyze">单只分析</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-backtest">策略回测</button></li>
   </ul>
@@ -785,20 +785,24 @@ async function loadHistory() {
 
 // ── Tab4: 信号历史 ────────────────────────────────────────
 
-let _histLoaded = false;
-
-async function loadScanHistory() {
-  if (_histLoaded) return;
-  _histLoaded = true;
+async function refreshScanHistoryDates() {
   const dates = await api('GET', '/api/scan_history/dates');
   const sel = document.getElementById('hist-date-select');
+  const prev = sel.value;
+  // 重建选项（保留第一个占位 option）
+  sel.innerHTML = '<option value="">— 选择扫描日期 —</option>';
   if (!dates.length) {
     sel.insertAdjacentHTML('beforeend', '<option disabled>暂无历史记录</option>');
     return;
   }
   dates.forEach(d => sel.insertAdjacentHTML('beforeend', `<option value="${d}">${d}</option>`));
-  sel.value = dates[0];
-  await loadScanByDate(dates[0]);
+  // 优先恢复上次选中的日期，否则默认最新
+  sel.value = (prev && dates.includes(prev)) ? prev : dates[0];
+  await loadScanByDate(sel.value);
+}
+
+async function loadScanHistory() {
+  await refreshScanHistoryDates();
 }
 
 async function loadScanByDate(date) {
