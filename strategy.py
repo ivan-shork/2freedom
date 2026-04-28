@@ -167,9 +167,10 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
     price_change_pct = (last["收盘"] - prev["收盘"]) / prev["收盘"]
     price_up = last["收盘"] > prev["收盘"]       # 布林带维度复用
     price_up_eff = price_change_pct > 0.003      # 有效上涨：涨幅 > 0.3%
-    price_stagnant = abs(price_change_pct) <= 0.003  # 滞涨/滞跌区间
-    price_down_eff = price_change_pct < -0.003   # 有效下跌：跌幅 > 0.3%
+    price_stagnant = abs(price_change_pct) <= 0.003  # 滞涨/滞跌区间（含0%到±0.3%）
+    price_down = price_change_pct < 0            # 任意下跌（不设幅度门槛）
     vol_ratio = last["成交量"] / last["vol_ma5"] if last["vol_ma5"] > 0 else 0.0
+    trend_up = last["收盘"] > last["ma20"] and last["ma5"] > last["ma10"]
 
     if price_up_eff and vol_ratio >= 1.5:
         pts = SCORE_WEIGHTS["volume_surge"]      # 15：放量有效上涨，最强确认
@@ -177,9 +178,15 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
     elif price_up_eff and vol_ratio >= 1.2:
         pts = 10                                 # 10：温和放量上涨
         details["volume_surge"] = f"+10(温和放量×{vol_ratio:.1f})"
-    elif price_down_eff and vol_ratio < 0.8:
-        pts = 8                                  # 8：缩量回调，抛压枯竭
-        details["volume_surge"] = f"+8(缩量回调×{vol_ratio:.1f})"
+    elif price_down and vol_ratio < 0.8 and trend_up and price_change_pct >= -0.01:
+        pts = 10                                 # 10：缩量温和回调（跌幅<1%，卖压极轻）
+        details["volume_surge"] = f"+10(缩量温和回调×{vol_ratio:.1f})"
+    elif price_down and vol_ratio < 0.8 and trend_up:
+        pts = 8                                  # 8：缩量深度回调（跌幅≥1%，卖压存在但量能收缩）
+        details["volume_surge"] = f"+8(缩量深度回调×{vol_ratio:.1f})"
+    elif price_stagnant and vol_ratio < 0.8 and trend_up:
+        pts = 5                                  # 5：缩量整理（横盘缩量，卖盘枯竭）
+        details["volume_surge"] = f"+5(缩量整理×{vol_ratio:.1f})"
     elif price_up_eff:
         pts = 5                                  # 5：平量有效上涨
         details["volume_surge"] = f"+5(平量上涨×{vol_ratio:.1f})"
