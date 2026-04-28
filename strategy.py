@@ -98,6 +98,7 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
     """
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
     score = 0
     details: dict[str, str] = {}
 
@@ -117,35 +118,46 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
     score += pts
 
     # --- MACD动量（最高25分，分层互斥） ---
-    is_golden_cross = prev["macd_dif"] <= prev["macd_dea"] and last["macd_dif"] > last["macd_dea"]
+    # 判断动能结构而非单日金叉事件，避免假金叉噪声
     dif_above_dea = last["macd_dif"] > last["macd_dea"]
-    hist_expanding = last["macd_hist"] > prev["macd_hist"]
+    dif_above_zero = last["macd_dif"] > 0
+    hist_expanding_today = last["macd_hist"] > prev["macd_hist"]
+    hist_expanding_2days = hist_expanding_today and prev["macd_hist"] > prev2["macd_hist"]
 
-    if is_golden_cross:
-        pts = SCORE_WEIGHTS["macd_momentum"]    # 25
-        details["macd_momentum"] = f"+{pts}(MACD金叉)"
-    elif dif_above_dea and hist_expanding:
-        pts = 20
-        details["macd_momentum"] = "+20(DIF>DEA柱扩张)"
-    elif dif_above_dea:
-        pts = 10
-        details["macd_momentum"] = "+10(DIF>DEA柱收缩)"
+    if dif_above_dea and dif_above_zero and hist_expanding_2days:
+        pts = SCORE_WEIGHTS["macd_momentum"]    # 25：零轴上方连续2日扩张，结构最强
+        details["macd_momentum"] = f"+{pts}(DIF>0且柱连续扩张)"
+    elif dif_above_dea and dif_above_zero and hist_expanding_today:
+        pts = 18                                # 18：零轴上方单日扩张，待次日确认
+        details["macd_momentum"] = "+18(DIF>0且柱今日扩张)"
+    elif dif_above_dea and dif_above_zero:
+        pts = 10                                # 10：零轴上方但动能衰减
+        details["macd_momentum"] = "+10(DIF>0柱收缩)"
+    elif dif_above_dea and hist_expanding_today:
+        pts = 10                                # 10：零轴下方反弹，谨慎
+        details["macd_momentum"] = "+10(DIF<0但柱扩张)"
     else:
         pts = 0
         details["macd_momentum"] = "0"
     score += pts
 
     # --- RSI区间（最高20分，分层互斥） ---
+    # 结合方向判断：同一区间内，RSI上升与下降含义截然不同
     rsi_val = float(last.get("rsi", 50))
-    if 45 <= rsi_val < 65:
-        pts = SCORE_WEIGHTS["rsi_zone"]         # 20
-        details["rsi_zone"] = f"+{pts}(RSI最佳区={rsi_val:.1f})"
-    elif 30 <= rsi_val < 45:
-        pts = 12
-        details["rsi_zone"] = f"+12(RSI回暖区={rsi_val:.1f})"
+    rsi_rising = last["rsi"] > prev["rsi"]
+
+    if 45 <= rsi_val < 65 and rsi_rising:
+        pts = SCORE_WEIGHTS["rsi_zone"]         # 20：健康区间且动能正在建立
+        details["rsi_zone"] = f"+{pts}(RSI动能建立={rsi_val:.1f}↑)"
+    elif 30 <= rsi_val < 50 and rsi_rising:
+        pts = 12                                # 12：从超卖回暖，方向已确认
+        details["rsi_zone"] = f"+12(RSI回暖确认={rsi_val:.1f}↑)"
     elif 65 <= rsi_val < 75:
-        pts = 8
+        pts = 8                                 # 8：强势区，接近超买不区分方向
         details["rsi_zone"] = f"+8(RSI强势区={rsi_val:.1f})"
+    elif 45 <= rsi_val < 65:
+        pts = 8                                 # 8：健康区间但动能在消耗
+        details["rsi_zone"] = f"+8(RSI健康区下行={rsi_val:.1f}↓)"
     else:
         pts = 0
         details["rsi_zone"] = f"0(RSI={rsi_val:.1f})"
@@ -165,13 +177,23 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
         details["volume_surge"] = f"0(量比×{vol_ratio:.1f})"
     score += pts
 
-    # --- 布林带支撑（10分，二元） ---
-    if last["收盘"] > last["boll_mid"] and last["收盘"] < last["boll_upper"]:
-        pts = SCORE_WEIGHTS["boll_support"]     # 10
-        details["boll_support"] = f"+{pts}"
+    # --- 布林带支撑（最高10分） ---
+    # 用 %B 精确定位价格在布林带内的位置，补充下轨反弹场景
+    boll_range = last["boll_upper"] - last["boll_lower"]
+    pct_b = (last["收盘"] - last["boll_lower"]) / boll_range if boll_range > 0 else 0.5
+
+    if 0.5 <= pct_b < 0.8 and price_up:
+        pts = SCORE_WEIGHTS["boll_support"]     # 10：中轨上方强势区间，动能延续
+        details["boll_support"] = f"+{pts}(%B={pct_b:.2f}强势区间)"
+    elif 0.0 <= pct_b < 0.2 and price_up:
+        pts = 8                                 # 8：下轨附近反弹，支撑确认
+        details["boll_support"] = f"+8(%B={pct_b:.2f}下轨反弹)"
+    elif 0.8 <= pct_b <= 1.0:
+        pts = 5                                 # 5：接近上轨，强势但注意压力
+        details["boll_support"] = f"+5(%B={pct_b:.2f}接近上轨)"
     else:
         pts = 0
-        details["boll_support"] = "0"
+        details["boll_support"] = f"0(%B={pct_b:.2f})"
     score += pts
 
     return min(score, 100), details
@@ -204,14 +226,14 @@ def generate_signal(
     market: MarketRegime,
 ) -> Signal | None:
     """为单只ETF生成交易信号"""
-    if len(df) < 60:
+    if len(df) < 61:
         logger.debug("%s %s 数据不足60条，跳过", code, name)
         return None
 
     df = calc_all_indicators(df)
     last = df.iloc[-1]
 
-    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
+    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5"]
     if last[required].isna().any():
         logger.debug("%s %s 指标存在NaN，跳过", code, name)
         return None
