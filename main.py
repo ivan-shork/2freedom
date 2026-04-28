@@ -37,14 +37,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def fetch_all_etf_data(etf_pool: list[dict]) -> dict[str, tuple[str, pd.DataFrame]]:
-    """并发获取所有ETF历史数据"""
+def fetch_all_etf_data(
+    etf_pool: list[dict],
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, tuple[str, pd.DataFrame]]:
+    """并发获取所有ETF历史数据。start_date/end_date 格式 YYYYMMDD，不传则使用默认窗口。"""
     etf_data: dict[str, tuple[str, pd.DataFrame]] = {}
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
             executor.submit(
-                fetch_etf_history, etf["code"], etf["name"], etf["ts_code"]
+                fetch_etf_history, etf["code"], etf["name"], etf["ts_code"], start_date, end_date
             ): etf["code"]
             for etf in etf_pool
         }
