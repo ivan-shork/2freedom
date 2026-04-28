@@ -131,8 +131,8 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
         pts = 18                                # 18：零轴上方单日扩张，待次日确认
         details["macd_momentum"] = "+18(DIF>0且柱今日扩张)"
     elif dif_above_dea and dif_above_zero:
-        pts = 10                                # 10：零轴上方但动能衰减
-        details["macd_momentum"] = "+10(DIF>0柱收缩)"
+        pts = 12                                # 12：零轴上方但动能衰减，趋势仍健康
+        details["macd_momentum"] = "+12(DIF>0柱收缩)"
     elif dif_above_dea and hist_expanding_today:
         pts = 10                                # 10：零轴下方反弹，谨慎
         details["macd_momentum"] = "+10(DIF<0但柱扩张)"
@@ -205,6 +205,9 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
     elif 0.8 <= pct_b <= 1.0:
         pts = 5                                 # 5：接近上轨，强势但注意压力
         details["boll_support"] = f"+5(%B={pct_b:.2f}接近上轨)"
+    elif pct_b > 1.0:
+        pts = 5                                 # 5：突破上轨，强势突破信号
+        details["boll_support"] = f"+5(%B={pct_b:.2f}突破上轨)"
     else:
         pts = 0
         details["boll_support"] = f"0(%B={pct_b:.2f})"
