@@ -234,10 +234,24 @@ def api_history():
 @app.post("/api/backtest")
 def api_backtest():
     try:
+        body = request.get_json(silent=True) or {}
+        # 日期格式统一转为 YYYYMMDD；前端传 YYYY-MM-DD
+        def _fmt(d: str | None) -> str | None:
+            return d.replace("-", "") if d else None
+
+        start_date = _fmt(body.get("start_date"))
+        end_date = _fmt(body.get("end_date"))
+
+        # 指数需向前多取90天保证 MA60 预热
+        from datetime import datetime as _dt, timedelta as _td
+        index_start = None
+        if start_date:
+            index_start = (_dt.strptime(start_date, "%Y%m%d") - _td(days=90)).strftime("%Y%m%d")
+
         from data_provider import get_etf_pool, get_index_daily
         etf_pool = get_etf_pool(ETF_POOL_SIZE)
-        etf_data = fetch_all_etf_data(etf_pool)
-        index_df = get_index_daily("000001.SH")
+        etf_data = fetch_all_etf_data(etf_pool, start_date, end_date)
+        index_df = get_index_daily("000001.SH", index_start, end_date)
         result = BacktestEngine().run(etf_data, index_df)
         return jsonify({
             "metrics": {

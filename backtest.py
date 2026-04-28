@@ -119,8 +119,16 @@ class BacktestEngine:
             logger.warning("回测日期不足60天，无法运行")
             return self._empty_result()
 
+        # --- 预计算：对每只ETF全量数据计算一次指标 ---
+        # EWM（MACD/RSI）在全量数据上已充分收敛，与实盘信号计算保持一致
+        # 回测循环中只需切片到当日，取末尾3行传给 score_buy_signal，无需重复计算
+        precomputed_ind: dict[str, pd.DataFrame] = {}
+        for code, (_, df) in etf_data.items():
+            precomputed_ind[code] = calc_all_indicators(df)
+        logger.info("指标预计算完成，共 %d 只ETF", len(precomputed_ind))
+
         # 为每只 ETF 建立日期->收盘价 / 开盘价索引
-        etf_indexed: dict[str, tuple[str, dict[str, float], dict[str, float], pd.DataFrame]] = {}
+        etf_indexed: dict[str, tuple[str, dict[str, float], dict[str, float]]] = {}
         for code, (name, df) in etf_data.items():
             close_map: dict[str, float] = {}
             open_map: dict[str, float] = {}
@@ -128,7 +136,11 @@ class BacktestEngine:
                 d = str(row["日期"])
                 close_map[d] = float(row["收盘"])
                 open_map[d] = float(row["开盘"])
-            etf_indexed[code] = (name, close_map, open_map, df)
+            etf_indexed[code] = (name, close_map, open_map)
+
+        _IND_REQUIRED = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea",
+                         "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5"]
+        _BUY_REQUIRED = _IND_REQUIRED + ["atr"]
 
         capital = self.initial_capital
         positions: list[_Position] = []
@@ -147,7 +159,7 @@ class BacktestEngine:
                     break
                 if pb_code in {p.code for p in positions}:
                     continue
-                _, _, open_map, _ = etf_indexed[pb_code]
+                _, _, open_map = etf_indexed[pb_code]
                 entry_price = open_map.get(current_date)
                 if entry_price is None:
                     continue  # ETF 当日停牌，放弃此笔
@@ -179,8 +191,9 @@ class BacktestEngine:
             to_close: list[tuple[_Position, float, str]] = []
 
             for pos in positions:
-                _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
-                price = close_map.get(current_date) if close_map else None
+                entry = etf_indexed.get(pos.code)
+                close_map = entry[1] if entry else {}
+                price = close_map.get(current_date)
                 if price is None:
                     continue
 
@@ -196,16 +209,15 @@ class BacktestEngine:
                 ):
                     to_close.append((pos, price, "trailing_stop"))
                 else:
-                    _, _, _, df_raw = etf_indexed[pos.code]
-                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(120)
-                    if len(hist) >= 61:
-                        hist = calc_all_indicators(hist)
-                        last = hist.iloc[-1]
-                        required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5"]
-                        if not last[required].isna().any():
-                            sig_score, _ = score_buy_signal(hist)
-                            if sig_score <= self.sell_threshold:
-                                to_close.append((pos, price, "signal_sell"))
+                    ind_df = precomputed_ind.get(pos.code)
+                    if ind_df is not None:
+                        hist_ind = ind_df[ind_df["日期"].astype(str) <= current_date]
+                        if len(hist_ind) >= 3:
+                            last = hist_ind.iloc[-1]
+                            if not last[_IND_REQUIRED].isna().any():
+                                sig_score, _ = score_buy_signal(hist_ind)
+                                if sig_score <= self.sell_threshold:
+                                    to_close.append((pos, price, "signal_sell"))
 
             for pos, price, reason in to_close:
                 capital += price * pos.shares
@@ -229,21 +241,23 @@ class BacktestEngine:
                 candidates: list[tuple[str, str, int, float]] = []
                 held_codes = {p.code for p in positions} | pending_codes
 
-                for code, (name, close_map, _, df_raw) in etf_indexed.items():
+                for code, (name, close_map, _) in etf_indexed.items():
                     if code in held_codes:
                         continue
 
-                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(120)
-                    if len(hist) < 61:
+                    ind_df = precomputed_ind.get(code)
+                    if ind_df is None:
                         continue
 
-                    hist = calc_all_indicators(hist)
-                    last = hist.iloc[-1]
-                    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5", "atr"]
-                    if last[required].isna().any():
+                    hist_ind = ind_df[ind_df["日期"].astype(str) <= current_date]
+                    if len(hist_ind) < 3:
                         continue
 
-                    sig_score, _ = score_buy_signal(hist)
+                    last = hist_ind.iloc[-1]
+                    if last[_BUY_REQUIRED].isna().any():
+                        continue
+
+                    sig_score, _ = score_buy_signal(hist_ind)
                     if sig_score >= effective_threshold:
                         candidates.append((code, name, sig_score, float(last["atr"])))
 
@@ -255,8 +269,8 @@ class BacktestEngine:
             # --- 4. 记录每日权益 ---
             position_value = 0.0
             for pos in positions:
-                _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
-                p = close_map.get(current_date) if close_map else None
+                entry = etf_indexed.get(pos.code)
+                p = entry[1].get(current_date) if entry else None
                 if p is not None:
                     position_value += p * pos.shares
 
@@ -265,8 +279,8 @@ class BacktestEngine:
         # --- 5. 回测结束，平掉剩余持仓 ---
         last_date = test_dates[-1]
         for pos in positions:
-            _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
-            price = close_map.get(last_date) if close_map else None
+            entry = etf_indexed.get(pos.code)
+            price = entry[1].get(last_date) if entry else None
             if price is None:
                 continue
             capital += price * pos.shares

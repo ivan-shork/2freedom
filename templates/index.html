@@ -199,8 +199,16 @@
     <!-- ══════════════ Tab6: 策略回测 ══════════════ -->
     <div class="tab-pane fade" id="tab-backtest">
       <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+        <div class="d-flex align-items-center gap-2">
+          <label class="text-muted small mb-0">开始日期</label>
+          <input type="date" id="bt-start-date" class="form-control form-control-sm" style="width:140px">
+        </div>
+        <div class="d-flex align-items-center gap-2">
+          <label class="text-muted small mb-0">结束日期</label>
+          <input type="date" id="bt-end-date" class="form-control form-control-sm" style="width:140px">
+        </div>
         <button class="btn btn-primary" onclick="runBacktest()">▶ 开始回测</button>
-        <span class="text-muted small">基于当前 ETF 池近365天历史数据，复用当前策略评分体系（首次运行需拉取数据，约1~2分钟）</span>
+        <span class="text-muted small">不填则默认近365天；自定义区间至少180天（首次运行需拉取数据，约1~2分钟）</span>
         <span id="bt-status" class="text-muted small"></span>
       </div>
 
@@ -861,7 +869,12 @@ async function runBacktest() {
   document.getElementById('bt-result').classList.add('d-none');
   showLoading('回测运行中，预计需要 1~2 分钟...');
 
-  const data = await api('POST', '/api/backtest', {});
+  const startDate = document.getElementById('bt-start-date').value;
+  const endDate   = document.getElementById('bt-end-date').value;
+  const payload   = {};
+  if (startDate) payload.start_date = startDate;
+  if (endDate)   payload.end_date   = endDate;
+  const data = await api('POST', '/api/backtest', payload);
   hideLoading();
   btn.disabled = false;
 

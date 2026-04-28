@@ -221,20 +221,24 @@ def get_etf_pool(top_n: int = ETF_POOL_SIZE) -> list[dict]:
 
 
 def fetch_etf_history(
-    code: str, name: str, ts_code: str
+    code: str, name: str, ts_code: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> tuple[str, str, pd.DataFrame] | None:
     """获取单只ETF历史日线数据，带重试。
 
     返回 DataFrame 列名：日期 / 开盘 / 最高 / 最低 / 收盘 / 成交量
+    start_date / end_date 格式 YYYYMMDD；不传则使用默认窗口并读写缓存。
     """
-    # 缓存命中直接返回
-    cached_df = _load_etf_cache(ts_code)
-    if cached_df is not None:
-        return code, name, cached_df
+    use_cache = start_date is None and end_date is None
+    if use_cache:
+        cached_df = _load_etf_cache(ts_code)
+        if cached_df is not None:
+            return code, name, cached_df
 
     pro = _get_pro()
-    start_date = (datetime.now() - timedelta(days=HISTORY_DAYS)).strftime("%Y%m%d")
-    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = start_date or (datetime.now() - timedelta(days=HISTORY_DAYS)).strftime("%Y%m%d")
+    end_date = end_date or datetime.now().strftime("%Y%m%d")
 
     for attempt in range(API_RETRY):
         try:
@@ -267,8 +271,8 @@ def fetch_etf_history(
             if len(df) < 30:
                 return None
 
-            # 写入缓存
-            _save_etf_cache(ts_code, df)
+            if use_cache:
+                _save_etf_cache(ts_code, df)
             return code, name, df
 
         except Exception as e:
@@ -280,22 +284,28 @@ def fetch_etf_history(
     return None
 
 
-def get_index_daily(ts_code: str = "000001.SH") -> pd.DataFrame:
+def get_index_daily(
+    ts_code: str = "000001.SH",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
     """获取指数日线数据（默认上证指数）。
 
-    返回 DataFrame 含 close 列，按日期升序排列。
-    拉取150个自然日（约105个交易日）确保 MA60 有足够数据，同时覆盖国庆/春节长假。
+    返回 DataFrame 含 trade_date / close 列，按日期升序排列。
+    start_date / end_date 格式 YYYYMMDD；不传则使用默认窗口并读写缓存。
     """
-    # 缓存命中直接返回
-    cached_df = _load_index_cache(ts_code)
-    if cached_df is not None:
-        return cached_df
+    use_cache = start_date is None and end_date is None
+    if use_cache:
+        cached_df = _load_index_cache(ts_code)
+        if cached_df is not None:
+            return cached_df
 
     pro = _get_pro()
-    start_date = (datetime.now() - timedelta(days=420)).strftime("%Y%m%d")
+    _start = start_date or (datetime.now() - timedelta(days=420)).strftime("%Y%m%d")
     df = pro.index_daily(
         ts_code=ts_code,
-        start_date=start_date,
+        start_date=_start,
+        end_date=end_date,
         fields="trade_date,close",
     )
     if df is None or df.empty:
@@ -303,6 +313,6 @@ def get_index_daily(ts_code: str = "000001.SH") -> pd.DataFrame:
 
     result = df.sort_values("trade_date").reset_index(drop=True)
 
-    # 写入缓存
-    _save_index_cache(ts_code, result)
+    if use_cache:
+        _save_index_cache(ts_code, result)
     return result
