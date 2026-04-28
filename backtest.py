@@ -7,6 +7,8 @@ import pandas as pd
 from dataclasses import dataclass, field
 
 from config import (
+    BEAR_THRESHOLD,
+    BULL_THRESHOLD,
     BUY_THRESHOLD,
     INITIAL_CAPITAL,
     MAX_POSITIONS,
@@ -96,16 +98,16 @@ class BacktestEngine:
     def run(
         self,
         etf_data: dict[str, tuple[str, pd.DataFrame]],
-        market: MarketRegime | None = None,
+        index_df: pd.DataFrame | None = None,
     ) -> BacktestResult:
         """运行回测
 
         Args:
-            etf_data: {code: (name, df)} — df 需含 日期/收盘/最高/最低/成交量 列
-            market: 市场环境（回测中默认 sideways）
+            etf_data:  {code: (name, df)} — df 需含 日期/开盘/收盘/最高/最低/成交量 列
+            index_df:  上证指数历史数据（含 trade_date/close 列），用于动态市场环境判断；
+                       不传则全程按 sideways 处理
         """
-        if market is None:
-            market = MarketRegime("sideways", 0.5, "回测默认")
+        regime_map = self._build_regime_map(index_df) if index_df is not None else {}
 
         # 收集所有交易日
         all_dates: set[str] = set()
@@ -117,27 +119,68 @@ class BacktestEngine:
             logger.warning("回测日期不足60天，无法运行")
             return self._empty_result()
 
-        # 为每只 ETF 建立日期->收盘价索引
-        etf_indexed: dict[str, tuple[str, dict[str, float], pd.DataFrame]] = {}
+        # 为每只 ETF 建立日期->收盘价 / 开盘价索引
+        etf_indexed: dict[str, tuple[str, dict[str, float], dict[str, float], pd.DataFrame]] = {}
         for code, (name, df) in etf_data.items():
-            price_map: dict[str, float] = {}
+            close_map: dict[str, float] = {}
+            open_map: dict[str, float] = {}
             for _, row in df.iterrows():
-                price_map[str(row["日期"])] = float(row["收盘"])
-            etf_indexed[code] = (name, price_map, df)
+                d = str(row["日期"])
+                close_map[d] = float(row["收盘"])
+                open_map[d] = float(row["开盘"])
+            etf_indexed[code] = (name, close_map, open_map, df)
 
         capital = self.initial_capital
         positions: list[_Position] = []
+        # 待执行买入队列（信号日收盘后入队，次日开盘执行）: (code, name, entry_atr)
+        pending_buys: list[tuple[str, str, float]] = []
         closed_trades: list[Trade] = []
         equity_curve: list[float] = [capital]
 
         test_dates = all_dates_sorted[60:]
 
         for current_date in test_dates:
-            # --- 1. 检查持仓：止损 / 止盈 / 移动止损 / 信号卖出 ---
+            # --- 0. 执行前一日挂单，今日开盘价入场 ---
+            executed: set[str] = set()
+            for pb_code, pb_name, pb_atr in pending_buys:
+                if len(positions) >= self.max_positions:
+                    break
+                if pb_code in {p.code for p in positions}:
+                    continue
+                _, _, open_map, _ = etf_indexed[pb_code]
+                entry_price = open_map.get(current_date)
+                if entry_price is None:
+                    continue  # ETF 当日停牌，放弃此笔
+                invest = capital * self.position_pct
+                shares = int(invest / entry_price / 100) * 100
+                if shares <= 0 or capital < shares * entry_price:
+                    continue
+                capital -= shares * entry_price
+                positions.append(_Position(
+                    code=pb_code,
+                    name=pb_name,
+                    entry_date=current_date,
+                    entry_price=entry_price,
+                    highest_price=entry_price,
+                    entry_atr=pb_atr,
+                    stop_loss=entry_price - self.stop_loss_mult * pb_atr,
+                    take_profit=entry_price + self.take_profit_mult * pb_atr,
+                    trailing_activate=entry_price + self.trailing_activate_mult * pb_atr,
+                    shares=shares,
+                ))
+                executed.add(pb_code)
+            pending_buys = [pb for pb in pending_buys if pb[0] not in executed]
+
+            # --- 1. 当日市场环境 → 动态买入阈值 ---
+            current_regime = regime_map.get(current_date, MarketRegime("sideways", 0.5, "默认"))
+            effective_threshold = self._effective_buy_threshold(current_regime.regime)
+
+            # --- 2. 检查持仓：止损 / 止盈 / 移动止损 / 信号卖出 ---
             to_close: list[tuple[_Position, float, str]] = []
 
             for pos in positions:
-                price = etf_indexed.get(pos.code, (None, {}, None))[1].get(current_date)
+                _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
+                price = close_map.get(current_date) if close_map else None
                 if price is None:
                     continue
 
@@ -153,19 +196,17 @@ class BacktestEngine:
                 ):
                     to_close.append((pos, price, "trailing_stop"))
                 else:
-                    # 信号卖出：当前评分低于卖出阈值
-                    _, _, df_raw = etf_indexed[pos.code]
-                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(60)
-                    if len(hist) >= 60:
+                    _, _, _, df_raw = etf_indexed[pos.code]
+                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(120)
+                    if len(hist) >= 61:
                         hist = calc_all_indicators(hist)
                         last = hist.iloc[-1]
-                        required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5"]
+                        required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5"]
                         if not last[required].isna().any():
                             sig_score, _ = score_buy_signal(hist)
                             if sig_score <= self.sell_threshold:
                                 to_close.append((pos, price, "signal_sell"))
 
-            # 执行平仓
             for pos, price, reason in to_close:
                 capital += price * pos.shares
                 pnl = (price - pos.entry_price) / pos.entry_price
@@ -182,68 +223,50 @@ class BacktestEngine:
                 if pos in positions:
                     positions.remove(pos)
 
-            # --- 2. 空余仓位 → 扫描买入信号 ---
-            if len(positions) < self.max_positions:
+            # --- 3. 扫描买入信号，挂单次日开盘执行 ---
+            pending_codes = {pb[0] for pb in pending_buys}
+            if len(positions) + len(pending_buys) < self.max_positions:
                 candidates: list[tuple[str, str, int, float]] = []
-                held_codes = {p.code for p in positions}
+                held_codes = {p.code for p in positions} | pending_codes
 
-                for code, (name, price_map, df_raw) in etf_indexed.items():
+                for code, (name, close_map, _, df_raw) in etf_indexed.items():
                     if code in held_codes:
                         continue
 
-                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(60)
-                    if len(hist) < 60:
+                    hist = df_raw[df_raw["日期"].astype(str) <= current_date].tail(120)
+                    if len(hist) < 61:
                         continue
 
                     hist = calc_all_indicators(hist)
                     last = hist.iloc[-1]
-                    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "vol_ma5", "atr"]
+                    required = ["ma5", "ma10", "ma20", "ma60", "macd_dif", "macd_dea", "macd_hist", "rsi", "boll_mid", "boll_upper", "boll_lower", "vol_ma5", "atr"]
                     if last[required].isna().any():
                         continue
 
                     sig_score, _ = score_buy_signal(hist)
-                    if sig_score >= self.buy_threshold:
-                        entry_price = float(last["收盘"])
-                        atr_val = float(last["atr"])
-                        candidates.append((code, name, sig_score, entry_price, atr_val))
+                    if sig_score >= effective_threshold:
+                        candidates.append((code, name, sig_score, float(last["atr"])))
 
                 candidates.sort(key=lambda x: x[2], reverse=True)
-                slots = self.max_positions - len(positions)
+                slots = self.max_positions - len(positions) - len(pending_buys)
+                for code, name, _, atr_val in candidates[:slots]:
+                    pending_buys.append((code, name, atr_val))
 
-                for code, name, score, price, atr_val in candidates[:slots]:
-                    invest = capital * self.position_pct
-                    shares = int(invest / price / 100) * 100
-                    if shares <= 0:
-                        continue
-
-                    cost = shares * price
-                    capital -= cost
-                    positions.append(_Position(
-                        code=code,
-                        name=name,
-                        entry_date=current_date,
-                        entry_price=price,
-                        highest_price=price,
-                        entry_atr=atr_val,
-                        stop_loss=price - self.stop_loss_mult * atr_val,
-                        take_profit=price + self.take_profit_mult * atr_val,
-                        trailing_activate=price + self.trailing_activate_mult * atr_val,
-                        shares=shares,
-                    ))
-
-            # --- 3. 记录每日权益 ---
+            # --- 4. 记录每日权益 ---
             position_value = 0.0
             for pos in positions:
-                price = etf_indexed.get(pos.code, (None, {}, None))[1].get(current_date)
-                if price is not None:
-                    position_value += price * pos.shares
+                _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
+                p = close_map.get(current_date) if close_map else None
+                if p is not None:
+                    position_value += p * pos.shares
 
             equity_curve.append(capital + position_value)
 
-        # --- 4. 回测结束，平掉剩余持仓 ---
+        # --- 5. 回测结束，平掉剩余持仓 ---
         last_date = test_dates[-1]
         for pos in positions:
-            price = etf_indexed.get(pos.code, (None, {}, None))[1].get(last_date)
+            _, close_map, _, _ = etf_indexed.get(pos.code, (None, {}, {}, None))
+            price = close_map.get(last_date) if close_map else None
             if price is None:
                 continue
             capital += price * pos.shares
@@ -260,6 +283,46 @@ class BacktestEngine:
             ))
 
         return self._calc_metrics(closed_trades, equity_curve)
+
+    def _effective_buy_threshold(self, regime: str) -> int:
+        """根据市场环境动态调整买入阈值，与 strategy.determine_action 保持一致"""
+        threshold = self.buy_threshold
+        if regime == "bear":
+            threshold += 15
+        elif regime == "sideways":
+            threshold += 5
+        return threshold
+
+    @staticmethod
+    def _build_regime_map(index_df: pd.DataFrame) -> dict[str, MarketRegime]:
+        """预计算每个交易日的市场环境（向量化，O(n)）"""
+        df = index_df.sort_values("trade_date").reset_index(drop=True)
+        ma20 = df["close"].rolling(20).mean()
+        ma60 = df["close"].rolling(60).mean()
+        ret_20d = df["close"].pct_change(20)
+
+        regime_map: dict[str, MarketRegime] = {}
+        for i in range(len(df)):
+            date = str(df["trade_date"].iloc[i])
+            if pd.isna(ma60.iloc[i]):
+                regime_map[date] = MarketRegime("sideways", 0.5, "数据不足")
+                continue
+            score = 0.5
+            if df["close"].iloc[i] > ma20.iloc[i]:
+                score += 0.15
+            if df["close"].iloc[i] > ma60.iloc[i]:
+                score += 0.15
+            ret = float(ret_20d.iloc[i]) if not pd.isna(ret_20d.iloc[i]) else 0.0
+            score += float(np.clip(ret * 2, -0.3, 0.3))
+            score = float(np.clip(score, 0, 1))
+            if score >= BULL_THRESHOLD:
+                regime = "bull"
+            elif score <= BEAR_THRESHOLD:
+                regime = "bear"
+            else:
+                regime = "sideways"
+            regime_map[date] = MarketRegime(regime, score, "历史回测")
+        return regime_map
 
     def _calc_metrics(self, trades: list[Trade], equity_curve: list[float]) -> BacktestResult:
         """计算绩效指标"""

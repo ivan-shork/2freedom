@@ -157,8 +157,9 @@ def main() -> None:
 
     # 5. 回测
     logger.info("开始回测...")
+    from data_provider import get_index_daily
     engine = BacktestEngine()
-    result = engine.run(etf_data, market)
+    result = engine.run(etf_data, get_index_daily("000001.SH"))
     print_backtest_result(result)
 
     logger.info("=== 扫描完成 ===")
