@@ -163,15 +163,29 @@ def score_buy_signal(df: pd.DataFrame) -> tuple[int, dict]:
         details["rsi_zone"] = f"0(RSI={rsi_val:.1f})"
     score += pts
 
-    # --- 量能确认（最高15分，分层互斥） ---
-    price_up = last["收盘"] > prev["收盘"]
+    # --- 量能确认（最高15分，五象限量价分析） ---
+    price_change_pct = (last["收盘"] - prev["收盘"]) / prev["收盘"]
+    price_up = last["收盘"] > prev["收盘"]       # 布林带维度复用
+    price_up_eff = price_change_pct > 0.003      # 有效上涨：涨幅 > 0.3%
+    price_stagnant = abs(price_change_pct) <= 0.003  # 滞涨/滞跌区间
+    price_down_eff = price_change_pct < -0.003   # 有效下跌：跌幅 > 0.3%
     vol_ratio = last["成交量"] / last["vol_ma5"] if last["vol_ma5"] > 0 else 0.0
-    if price_up and vol_ratio >= 1.5:
-        pts = SCORE_WEIGHTS["volume_surge"]     # 15
-        details["volume_surge"] = f"+{pts}(强放量×{vol_ratio:.1f})"
-    elif price_up and vol_ratio >= 1.2:
-        pts = 10
+
+    if price_up_eff and vol_ratio >= 1.5:
+        pts = SCORE_WEIGHTS["volume_surge"]      # 15：放量有效上涨，最强确认
+        details["volume_surge"] = f"+{pts}(放量上涨×{vol_ratio:.1f})"
+    elif price_up_eff and vol_ratio >= 1.2:
+        pts = 10                                 # 10：温和放量上涨
         details["volume_surge"] = f"+10(温和放量×{vol_ratio:.1f})"
+    elif price_down_eff and vol_ratio < 0.8:
+        pts = 8                                  # 8：缩量回调，抛压枯竭
+        details["volume_surge"] = f"+8(缩量回调×{vol_ratio:.1f})"
+    elif price_up_eff:
+        pts = 5                                  # 5：平量有效上涨
+        details["volume_surge"] = f"+5(平量上涨×{vol_ratio:.1f})"
+    elif price_stagnant and vol_ratio >= 1.2:
+        pts = 0                                  # 0：放量滞涨，量价背离疑似出货
+        details["volume_surge"] = f"0(放量滞涨×{vol_ratio:.1f}警示)"
     else:
         pts = 0
         details["volume_surge"] = f"0(量比×{vol_ratio:.1f})"
