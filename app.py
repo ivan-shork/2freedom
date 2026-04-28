@@ -233,11 +233,11 @@ def api_history():
 @app.post("/api/backtest")
 def api_backtest():
     try:
-        market = detect_market_regime()
-        from data_provider import get_etf_pool
+        from data_provider import get_etf_pool, get_index_daily
         etf_pool = get_etf_pool(ETF_POOL_SIZE)
         etf_data = fetch_all_etf_data(etf_pool)
-        result = BacktestEngine().run(etf_data, market)
+        index_df = get_index_daily("000001.SH")
+        result = BacktestEngine().run(etf_data, index_df)
         return jsonify({
             "metrics": {
                 "total_return":    result.total_return,
